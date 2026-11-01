@@ -2,6 +2,7 @@ mod aim;
 mod ambient;
 mod app;
 mod config;
+mod datadir;
 mod difficulty;
 mod history;
 mod input;
@@ -13,15 +14,19 @@ mod stats;
 mod term;
 mod theme;
 
-use config::Command;
+use config::{Command, DataCmd};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(dir) = config::data_flag(&args) {
+        datadir::set_override(dir);
+    }
     let (mut cfg, warning) = config::load();
     if let Some(w) = warning {
         eprintln!("{w}");
     }
-    let cli = match config::parse_args(std::env::args().skip(1), &mut cfg) {
+    let cli = match config::parse_args(args, &mut cfg) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
@@ -31,6 +36,12 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Help => println!("{}", config::USAGE),
         Command::Version => println!("rt {}", env!("CARGO_PKG_VERSION")),
+        Command::Data(cmd) => {
+            if let Err(e) = data(cmd) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
         Command::Export { out } => {
             if let Err(e) = export(out) {
                 eprintln!("error: {e}");
@@ -74,6 +85,36 @@ fn export(out: Option<std::path::PathBuf>) -> std::io::Result<()> {
     };
     if let Some(p) = out {
         eprintln!("{n} intentos de {} sesiones en {}", sessions.len(), p.display());
+    }
+    Ok(())
+}
+
+fn data(cmd: DataCmd) -> std::io::Result<()> {
+    match cmd {
+        DataCmd::Show => {
+            let (dir, source) = datadir::resolve();
+            let (sessions, _) = history::load(&dir.join("history.jsonl"));
+            println!("{} ({})", dir.display(), source.label());
+            println!("{} sesiones en el historial", sessions.len());
+        }
+        DataCmd::Set(dir) => {
+            let m = datadir::set_location(&dir)?;
+            println!("datos en {}", m.to.display());
+            if m.from != m.to {
+                println!("historial fusionado desde {}: {} sesiones nuevas, {} en total", m.from.display(), m.added, m.total);
+                println!("la carpeta anterior no se borró");
+            }
+            if m.config_copied {
+                println!("configuración copiada");
+            }
+        }
+        DataCmd::Reset => {
+            if datadir::reset_location()? {
+                println!("vuelve a usar {}", datadir::default_dir().display());
+            } else {
+                println!("no había carpeta guardada; se usa {}", datadir::data_dir().display());
+            }
+        }
     }
     Ok(())
 }

@@ -412,13 +412,9 @@ pub fn targets_level_label(level: usize) -> String {
         .unwrap_or_else(|| format!("nivel {level}"))
 }
 
-/// Carpeta de datos: %APPDATA%\term-aim (o ~/.config/term-aim fuera de Windows).
+/// Carpeta de datos (ver `datadir` para el orden de prioridad).
 pub fn data_dir() -> PathBuf {
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        return PathBuf::from(appdata).join("term-aim");
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".config").join("term-aim")
+    crate::datadir::data_dir()
 }
 
 pub fn config_path() -> PathBuf {
@@ -448,8 +444,22 @@ pub enum Command {
     #[default]
     Run,
     Export { out: Option<PathBuf> },
+    /// `rt data`: muestra la carpeta de datos; `set` la cambia, `reset` vuelve a la normal.
+    Data(DataCmd),
     Help,
     Version,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DataCmd {
+    Show,
+    Set(PathBuf),
+    Reset,
+}
+
+/// Busca `--data CARPETA` antes de leer la configuración, porque cambia dónde se lee.
+pub fn data_flag(args: &[String]) -> Option<PathBuf> {
+    args.iter().position(|a| a == "--data").and_then(|i| args.get(i + 1)).map(PathBuf::from)
 }
 
 #[derive(Debug, Default)]
@@ -468,6 +478,9 @@ uso:
   rt --baseline          prueba base de decisión (30 intentos)
   rt --mode blancos      modo Blancos: varios verdes, 30 s, solo mouse
   rt export [-o ARCHIVO] exporta los intentos a CSV (stdout por defecto)
+  rt data                muestra dónde se guardan historial y configuración
+  rt data set CARPETA    usa esa carpeta desde ahora (fusiona el historial actual)
+  rt data reset          vuelve a la carpeta por defecto
 
 opciones:
   --mode decision|blancos|flick|seguimiento|reaccion|gonogo  modo de juego
@@ -477,6 +490,7 @@ opciones:
   --timeout MS           tiempo límite por intento (modo fijo)
   --fixed | --adaptive   dificultad
   --pixel                intentar mouse en píxeles (SGR 1016)
+  --data CARPETA         usar esa carpeta de datos solo en esta ejecución
   --warmup N             intentos de calentamiento (0 lo quita)
   -h, --help             esta ayuda
   -V, --version          versión
@@ -502,6 +516,18 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, cfg: &mut Config) -> 
     while let Some(a) = it.next() {
         match a.as_str() {
             "export" => cli.command = Command::Export { out: None },
+            "data" => {
+                cli.command = Command::Data(match it.next().as_deref() {
+                    None => DataCmd::Show,
+                    Some("set") => DataCmd::Set(PathBuf::from(it.next().ok_or("rt data set necesita una carpeta")?)),
+                    Some("reset") => DataCmd::Reset,
+                    Some(other) => return Err(format!("rt data: opción desconocida: {other}")),
+                })
+            }
+            // Ya se aplicó antes de leer la configuración.
+            "--data" => {
+                it.next().ok_or("--data necesita una carpeta")?;
+            }
             "-o" | "--output" => {
                 let p = it.next().ok_or("falta el archivo después de -o")?;
                 cli.command = Command::Export { out: Some(PathBuf::from(p)) };
@@ -596,6 +622,21 @@ mod tests {
         assert_eq!(c.targets_difficulty, Difficulty::Adaptive);
         c.cycle_difficulty(true);
         assert_eq!((c.flick_difficulty, c.flick_level), (Difficulty::Fixed, 1));
+    }
+
+    #[test]
+    fn parses_data_commands() {
+        let mut c = Config::default();
+        assert_eq!(parse_args(args(&["data"]), &mut c).unwrap().command, Command::Data(DataCmd::Show));
+        assert_eq!(
+            parse_args(args(&["data", "set", "x"]), &mut c).unwrap().command,
+            Command::Data(DataCmd::Set("x".into()))
+        );
+        assert_eq!(parse_args(args(&["data", "reset"]), &mut c).unwrap().command, Command::Data(DataCmd::Reset));
+        assert!(parse_args(args(&["data", "set"]), &mut c).is_err());
+        let a = args(&["--data", "D:/rt", "--quick"]);
+        assert_eq!(data_flag(&a), Some(PathBuf::from("D:/rt")));
+        assert!(parse_args(a, &mut c).unwrap().quick);
     }
 
     #[test]

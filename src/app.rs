@@ -303,6 +303,8 @@ pub struct App {
     pub progress_view: usize,
     /// Dificultad que filtra el progreso (`None`: todas).
     pub progress_filter: Option<String>,
+    /// Progreso agrupado por semana en vez de por sesión.
+    pub progress_weekly: bool,
     /// Análisis de puntería abierto y a qué pantalla volver.
     pub aim: Option<AimReport>,
     aim_back: Screen,
@@ -346,6 +348,7 @@ impl App {
             bad_lines,
             progress_view: 0,
             progress_filter: None,
+            progress_weekly: false,
             aim: None,
             aim_back: Screen::Menu,
             notice: None,
@@ -513,6 +516,12 @@ impl App {
         self.progress_sessions()
             .filter(|s| self.progress_filter.is_none() || report::difficulty_key(s) == self.progress_filter)
             .collect()
+    }
+
+    /// Filas del progreso: una por sesión o, con `w`, una por semana.
+    pub fn progress_rows(&self) -> Vec<report::ProgressRow> {
+        let list = self.progress_list();
+        if self.progress_weekly { report::weekly_rows(&list) } else { report::session_rows(&list) }
     }
 
     /// Dificultades presentes en la vista, en orden de aparición.
@@ -765,6 +774,7 @@ impl App {
                     self.progress_filter = None;
                 }
                 KeyCode::Char('d') => self.cycle_progress_filter(),
+                KeyCode::Char('w') => self.progress_weekly = !self.progress_weekly,
                 KeyCode::Esc | KeyCode::Enter => self.screen = Screen::Menu,
                 _ => return,
             },

@@ -518,10 +518,6 @@ pub fn bars(values: &[Option<f64>], rows: usize) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn short_date(d: &str) -> String {
-    d.get(5..16).map(|x| x.replace('T', " ")).unwrap_or_else(|| d.to_string())
-}
-
 /// Compara la última sesión con la mediana de las 5 anteriores.
 pub(crate) fn trend(t: &Theme, vals: &[f64], lower_is_better: bool) -> Span<'static> {
     let Some((&last, before)) = vals.split_last() else { return Span::raw("") };
@@ -547,10 +543,11 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let (kind, _) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
     let list = app.progress_list();
+    let rows = app.progress_rows();
 
     let framed = area.width >= 50 && area.height >= 18;
     let inner = if framed {
-        let block = frame_block(t, "progreso", "←→ vista · d dificultad · Esc");
+        let block = frame_block(t, "progreso", "←→ vista · d dificultad · w semanas · Esc");
         let r = block.inner(area);
         f.render_widget(Clear, area);
         f.render_widget(block, area);
@@ -570,15 +567,15 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
         ),
     ];
     let mut lines: Vec<Line> = vec![Line::from(tabs)];
+    let mut opts = Vec::new();
     if !app.progress_keys().is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("dificultad: ", t.dim()),
-            Span::styled(app.progress_filter.clone().unwrap_or_else(|| "todas".into()), t.accent()),
-            Span::styled(" (d)", t.dim()),
-        ]));
-    } else {
-        lines.push(Line::raw(""));
+        opts.push(Span::styled("dificultad ", t.dim()));
+        opts.push(Span::styled(app.progress_filter.clone().unwrap_or_else(|| "todas".into()), t.accent()));
+        opts.push(Span::styled(" (d) · ", t.dim()));
     }
+    opts.push(Span::styled(if app.progress_weekly { "por semana" } else { "por sesión" }, t.accent()));
+    opts.push(Span::styled(" (w)", t.dim()));
+    lines.push(Line::from(opts));
 
     if list.is_empty() {
         lines.push(Line::styled("sin sesiones completas todavía", t.dim()));
@@ -588,9 +585,9 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             h if h >= 20 => 2,
             _ => 1,
         };
-        let recent = &list[list.len().saturating_sub(width)..];
+        let recent = &rows[rows.len().saturating_sub(width)..];
         for m in report::series(kind) {
-            let vals: Vec<Option<f64>> = recent.iter().map(|s| (m.get)(&s.stats)).collect();
+            let vals: Vec<Option<f64>> = recent.iter().map(|r| (m.get)(&r.stats)).collect();
             let present: Vec<f64> = vals.iter().flatten().copied().collect();
             let lo = present.iter().copied().reduce(f64::min);
             let hi = present.iter().copied().reduce(f64::max);
@@ -613,18 +610,13 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::raw(""));
         let (second, main) = report::main_column(kind);
         let (last_name, last) = report::score_column(kind);
-        lines.push(Line::styled(format!("{:<12}{:>9}{:>7}{:>10}", "fecha UTC", second, "prec", last_name), t.dim()));
+        let first = if app.progress_weekly { "semana" } else { "fecha UTC" };
+        lines.push(Line::styled(format!("{first:<12}{second:>9}{:>7}{last_name:>10}", "prec"), t.dim()));
         let reserve = if framed { 0 } else { 1 };
         let room = (inner.height as usize).saturating_sub(lines.len() + reserve);
-        for s in list.iter().rev().take(room) {
+        for r in rows.iter().rev().take(room) {
             lines.push(Line::styled(
-                format!(
-                    "{:<12}{:>9}{:>7}{:>10}",
-                    short_date(&s.date),
-                    main(&s.stats),
-                    pct(s.stats.accuracy),
-                    last(&s.stats)
-                ),
+                format!("{:<12}{:>9}{:>7}{:>10}", r.label, main(&r.stats), pct(r.stats.accuracy), last(&r.stats)),
                 t.text(),
             ));
         }
@@ -639,7 +631,7 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::raw(""));
         }
         lines.truncate(last);
-        lines.push(Line::styled("←→ vista · d dificultad · Esc", t.dim()));
+        lines.push(Line::styled("←→ vista · d dific. · w semanas · Esc", t.dim()));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }

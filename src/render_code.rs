@@ -4,10 +4,9 @@
 
 use crate::app::{App, MENU, MenuItem, PROGRESS_VIEWS, PauseReason, Screen};
 use crate::config::{Config, Difficulty, GameKind};
-use crate::history::SessionRecord;
 use crate::modes::Outcome;
 use crate::render::{
-    PLine, aim_body, bars, delta, draw_effects, fit, mode_hint, ms, pct, play_area, short_date, status_area, trend,
+    PLine, aim_body, bars, delta, draw_effects, fit, mode_hint, ms, pct, play_area, status_area, trend,
     view_name,
 };
 use crate::report::{self, Metric};
@@ -304,19 +303,11 @@ fn summary(f: &mut Frame, app: &App, area: Rect) {
     output(f, area, lines);
 }
 
-/// Hash corto y estable para que cada sesión parezca un commit.
-fn fake_hash(s: &SessionRecord) -> String {
-    let mut h: u32 = 0x811c_9dc5;
-    for b in s.date.bytes().chain(s.mode.bytes()) {
-        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
-    }
-    format!("{:07x}", h & 0x0fff_ffff)
-}
-
 fn progress(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let (kind, baseline) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
     let list = app.progress_list();
+    let rows = app.progress_rows();
     let mut cmd = format!("rt log --mode {}", kind.id());
     if baseline {
         cmd.push_str(" --baseline");
@@ -324,13 +315,16 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
     if let Some(f) = &app.progress_filter {
         cmd.push_str(&format!(" --level {f}"));
     }
+    if app.progress_weekly {
+        cmd.push_str(" --weekly");
+    }
     let mut lines: Vec<PLine> = vec![(prompt(app, &cmd, area.width), 0)];
     lines.push((
         Line::from(vec![
             Span::styled("view ", t.dim()),
             Span::styled(format!("[{}/{}]", app.progress_view + 1, PROGRESS_VIEWS.len()), t.accent()),
             Span::styled(format!(" {} · {} sessions", view_name(app.progress_view), list.len()), t.dim()),
-            Span::styled(if app.progress_keys().is_empty() { "" } else { " · d filtra" }, t.dim()),
+            Span::styled(if app.progress_weekly { " · por semana" } else { "" }, t.dim()),
         ]),
         1,
     ));
@@ -339,9 +333,9 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
     } else {
         let width = area.width as usize;
         let chart_w = width.saturating_sub(34).clamp(6, 60);
-        let recent = &list[list.len().saturating_sub(chart_w)..];
+        let recent = &rows[rows.len().saturating_sub(chart_w)..];
         for m in report::series(kind) {
-            let vals: Vec<Option<f64>> = recent.iter().map(|s| (m.get)(&s.stats)).collect();
+            let vals: Vec<Option<f64>> = recent.iter().map(|r| (m.get)(&r.stats)).collect();
             let present: Vec<f64> = vals.iter().flatten().copied().collect();
             let col_w = (chart_w / vals.len().max(1)).clamp(1, 3);
             let chart: String = bars(&vals, 1)
@@ -362,18 +356,18 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
         lines.push((Line::raw(""), 3));
         let (main_name, main) = report::main_column(kind);
         let (last_name, last) = report::score_column(kind);
-        for s in list.iter().rev() {
+        for r in rows.iter().rev() {
             let kv = |k: &str, v: String| format!("{k}={}", v.replace(' ', ""));
             lines.push((
                 Line::from(vec![
-                    Span::styled(format!("{} ", fake_hash(s)), Style::default().fg(t.target)),
-                    Span::styled(format!("{} ", short_date(&s.date)), t.dim()),
+                    Span::styled(format!("{:<7} ", r.tag), Style::default().fg(t.target)),
+                    Span::styled(format!("{} ", r.label), t.dim()),
                     Span::styled(
                         format!(
                             "{} {} {}",
-                            kv(main_name, main(&s.stats)),
-                            kv("acc", pct(s.stats.accuracy)),
-                            kv(last_name, last(&s.stats))
+                            kv(main_name, main(&r.stats)),
+                            kv("acc", pct(r.stats.accuracy)),
+                            kv(last_name, last(&r.stats))
                         ),
                         t.text(),
                     ),
@@ -386,7 +380,7 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
         lines.push((Line::styled(format!("warning: {} líneas dañadas ignoradas", app.bad_lines), t.dim()), 1));
     }
     // El pie siempre visible: va al final y las filas del log (prioridad 5) ceden primero.
-    lines.push((Line::styled("←→ vista · d dificultad · Esc", t.dim()), 0));
+    lines.push((Line::styled("←→ vista · d dific. · w semanas · Esc", t.dim()), 0));
     let lines = fit_keep_order(lines, area.height as usize);
     output(f, area, lines);
 }
@@ -538,10 +532,10 @@ mod tests {
             stats: Stats::default(),
             trials: vec![],
         };
-        let a = fake_hash(&s);
+        let a = report::session_hash(&s);
         assert_eq!(a.len(), 7);
-        assert_eq!(a, fake_hash(&s));
+        assert_eq!(a, report::session_hash(&s));
         s.date.push('x');
-        assert_ne!(a, fake_hash(&s));
+        assert_ne!(a, report::session_hash(&s));
     }
 }

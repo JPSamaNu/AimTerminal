@@ -259,7 +259,10 @@ y la dificultad.
 El resumen compara cada métrica con la sesión anterior del mismo modo y dificultad
 (verde si mejora, rojo si empeora). El progreso tiene una vista por modo (y una para las baselines de decisión). En los modos con
 dificultad (decisión, blancos, flick), `d` filtra por dificultad: todas → cada una
-de las que jugaste → todas, para no mezclar sesiones fáciles con expertas en la gráfica. Muestra, por métrica, el último valor,
+de las que jugaste → todas, para no mezclar sesiones fáciles con expertas en la gráfica.
+`w` alterna entre **por sesión** y **por semana** (de lunes a domingo, UTC): cada semana
+muestra la mediana de sus sesiones en cada métrica, así un día malo o uno muy bueno no
+mueven la tendencia, y la tabla dice cuántas sesiones tuvo (`n=5`). Muestra, por métrica, el último valor,
 la tendencia frente a la mediana de las 5 sesiones anteriores, el rango y una gráfica
 de barras que crece en altura cuando el panel es grande.
 

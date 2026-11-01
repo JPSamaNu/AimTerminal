@@ -144,6 +144,28 @@ pub fn now_iso() -> String {
     iso_utc(secs)
 }
 
+/// Días desde 1970-01-01 de una fecha civil (algoritmo de H. Hinnant).
+pub fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Lunes (UTC) de la semana de una fecha `AAAA-MM-DD…`, como `AAAA-MM-DD`.
+pub fn week_start(date: &str) -> Option<String> {
+    let y: i64 = date.get(0..4)?.parse().ok()?;
+    let m: i64 = date.get(5..7)?.parse().ok()?;
+    let d: i64 = date.get(8..10)?.parse().ok()?;
+    let days = days_from_civil(y, m, d);
+    // 1970-01-01 fue jueves: (días + 3) mod 7 da 0 para los lunes.
+    let monday = days - (days + 3).rem_euclid(7);
+    Some(iso_utc((monday * 86_400) as u64)[..10].to_string())
+}
+
 /// Segundos Unix a `AAAA-MM-DDTHH:MM:SSZ` (algoritmo de días civiles de H. Hinnant).
 pub fn iso_utc(secs: u64) -> String {
     let days = (secs / 86_400) as i64;
@@ -164,6 +186,17 @@ pub fn iso_utc(secs: u64) -> String {
 mod tests {
     use super::*;
     use crate::modes::{Method, Outcome};
+
+    #[test]
+    fn weeks_start_on_monday() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        // 2026-11-01 es domingo: su semana empieza el lunes 26 de octubre.
+        assert_eq!(week_start("2026-11-01T10:00:00Z").as_deref(), Some("2026-10-26"));
+        assert_eq!(week_start("2026-11-02T00:00:00Z").as_deref(), Some("2026-11-02"));
+        assert_eq!(week_start("2026-10-26T23:59:59Z").as_deref(), Some("2026-10-26"));
+        assert_eq!(week_start("roto"), None);
+    }
 
     #[test]
     fn iso_dates() {

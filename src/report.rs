@@ -256,6 +256,68 @@ pub fn difficulty_key(s: &SessionRecord) -> Option<String> {
     cfg.difficulty_label()
 }
 
+/// Una fila del progreso: una sesión o una semana.
+pub struct ProgressRow {
+    /// Fecha corta de la sesión, o "sem MM-DD" (lunes de la semana).
+    pub label: String,
+    /// Hash de la sesión o "n=5" sesiones en la semana.
+    pub tag: String,
+    pub stats: Stats,
+}
+
+pub fn short_date(d: &str) -> String {
+    d.get(5..16).map(|x| x.replace('T', " ")).unwrap_or_else(|| d.to_string())
+}
+
+/// Hash corto y estable para que cada sesión parezca un commit.
+pub fn session_hash(s: &SessionRecord) -> String {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.date.bytes().chain(s.mode.bytes()) {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    format!("{:07x}", h & 0x0fff_ffff)
+}
+
+pub fn session_rows(list: &[&SessionRecord]) -> Vec<ProgressRow> {
+    list.iter()
+        .map(|s| ProgressRow { label: short_date(&s.date), tag: session_hash(s), stats: s.stats.clone() })
+        .collect()
+}
+
+/// Agrupa por semana (de lunes a domingo, UTC). Cada métrica de la semana es la mediana
+/// de las sesiones: así un día malo o uno muy bueno no mueven la tendencia.
+pub fn weekly_rows(list: &[&SessionRecord]) -> Vec<ProgressRow> {
+    let mut weeks: Vec<(String, Vec<&Stats>)> = Vec::new();
+    for s in list {
+        let Some(w) = crate::history::week_start(&s.date) else { continue };
+        match weeks.last_mut() {
+            Some((cur, v)) if *cur == w => v.push(&s.stats),
+            _ => weeks.push((w, vec![&s.stats])),
+        }
+    }
+    weeks
+        .into_iter()
+        .map(|(w, v)| {
+            let med = |f: fn(&Stats) -> Option<f64>| median(&v.iter().filter_map(|s| f(s)).collect::<Vec<_>>());
+            let stats = Stats {
+                trials: v.iter().map(|s| s.trials).sum(),
+                hits: med(|s| Some(s.hits as f64)).unwrap_or(0.0).round() as usize,
+                median_ms: med(|s| s.median_ms),
+                mean_ms: med(|s| s.mean_ms),
+                best_ms: v.iter().filter_map(|s| s.best_ms).reduce(f64::min),
+                accuracy: med(|s| s.accuracy),
+                ies_ms: med(|s| s.ies_ms),
+                on_target: med(|s| s.on_target),
+                mean_dist: med(|s| s.mean_dist),
+                commission_rate: med(|s| s.commission_rate),
+                throughput: med(|s| s.throughput),
+                ..Stats::default()
+            };
+            ProgressRow { label: format!("sem {}", w.get(5..).unwrap_or(&w)), tag: format!("n={}", v.len()), stats }
+        })
+        .collect()
+}
+
 /// Métrica de la gráfica de progreso.
 pub struct Series {
     pub label: &'static str,
@@ -298,5 +360,51 @@ pub fn score_column(kind: GameKind) -> (&'static str, fn(&Stats) -> String) {
     match kind {
         GameKind::Tracking => ("distancia", |s| cells(s.mean_dist)),
         _ => ("puntaje", |s| ms(s.ies_ms)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(date: &str, med: f64, hits: usize) -> SessionRecord {
+        SessionRecord {
+            version: 1,
+            date: date.into(),
+            mode: "flick".into(),
+            difficulty: Difficulty::Fixed,
+            baseline: false,
+            incomplete: false,
+            discarded: 0,
+            final_level: None,
+            duration_s: None,
+            pixel_mouse: false,
+            config: Config::default(),
+            stats: Stats { median_ms: Some(med), hits, accuracy: Some(0.9), ..Stats::default() },
+            trials: vec![],
+        }
+    }
+
+    #[test]
+    fn weekly_rows_take_median_per_week() {
+        let list = [
+            rec("2026-10-26T10:00:00Z", 500.0, 20),
+            rec("2026-10-28T10:00:00Z", 400.0, 24),
+            rec("2026-11-01T10:00:00Z", 900.0, 10),
+            rec("2026-11-02T10:00:00Z", 380.0, 30),
+        ];
+        let refs: Vec<&SessionRecord> = list.iter().collect();
+        let rows = weekly_rows(&refs);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].label, "sem 10-26");
+        assert_eq!(rows[0].tag, "n=3");
+        // Mediana de 500, 400 y 900: el día malo no arrastra la semana.
+        assert_eq!(rows[0].stats.median_ms, Some(500.0));
+        assert_eq!(rows[0].stats.hits, 20);
+        assert_eq!(rows[1].label, "sem 11-02");
+        assert_eq!(rows[1].stats.median_ms, Some(380.0));
+        let sessions = session_rows(&refs);
+        assert_eq!(sessions.len(), 4);
+        assert_eq!(sessions[0].tag.len(), 7);
     }
 }

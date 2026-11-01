@@ -1,10 +1,12 @@
 //! Modo Flick: un solo blanco pequeño lejos del cursor. Al acertarlo aparece otro en
 //! otra dirección; las 8 direcciones salen repartidas por igual para que el análisis
 //! por ángulo tenga datos de todas. Un clic fuera es un fallo y el blanco se queda.
+//! El nivel (0 a 9) achica el blanco y lo hace salir más lejos del cursor.
 
 use super::layout::{cell_distance, center, contains, find_spot, inner};
 use super::{Flash, FlashKind, GameMode, Method, Outcome, Params, Response, Step, TrialRecord, pt};
 use crate::config::{Config, Fill};
+use crate::difficulty::flick_level;
 use crate::render;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -34,6 +36,7 @@ pub struct Flick {
     phase: Phase,
     completed: usize,
     flashes: Vec<Flash>,
+    level: Option<usize>,
 }
 
 impl Flick {
@@ -42,7 +45,7 @@ impl Flick {
             rng,
             anticipation: Duration::from_millis(cfg.anticipation_ms),
             timeout: Duration::from_millis(cfg.flick_timeout_ms),
-            size: (cfg.flick_w, cfg.flick_h),
+            size: (flick_level(3).w, flick_level(3).h),
             fill: cfg.target_fill,
             area: Rect::default(),
             rect: None,
@@ -50,6 +53,7 @@ impl Flick {
             phase: Phase::Idle,
             completed: 0,
             flashes: Vec::new(),
+            level: None,
         }
     }
 
@@ -68,9 +72,14 @@ impl Flick {
         let (w, h) = (self.size.0.min(area.width), self.size.1.min(area.height));
         let dir = self.next_direction();
         let max_d = (area.width as f32).hypot(2.0 * area.height as f32);
-        for _ in 0..60 {
+        let span = (max_d * 0.6 - MIN_DIST).max(1.0);
+        let lv = flick_level(self.level.unwrap_or(3));
+        for i in 0..60 {
             let angle = (dir as f32 * 45.0 + self.rng.f32() * 30.0 - 15.0).to_radians();
-            let d = MIN_DIST + self.rng.f32() * (max_d * 0.6 - MIN_DIST).max(1.0);
+            // Si la dirección no deja espacio para la distancia del nivel, se va acercando.
+            let shrink = 1.0 - i as f32 / 60.0;
+            let frac = (lv.near + self.rng.f32() * (lv.far - lv.near)) * shrink;
+            let d = MIN_DIST + frac * span;
             // La vertical se divide entre 2 porque una celda es el doble de alta que ancha.
             let (cx, cy) = (from.0 + angle.cos() * d, from.1 - angle.sin() * d / 2.0);
             let x = cx - w as f32 / 2.0;
@@ -92,7 +101,7 @@ impl Flick {
         let c = center(&rect);
         let rec = TrialRecord {
             index: self.completed,
-            level: None,
+            level: self.level,
             n_boxes: 1,
             target_present: true,
             target_w: rect.width,
@@ -134,7 +143,9 @@ impl GameMode for Flick {
         "flick"
     }
 
-    fn start_trial(&mut self, area: Rect, _params: &Params, _now: Instant, cursor: Option<(f32, f32)>) {
+    fn start_trial(&mut self, area: Rect, params: &Params, _now: Instant, cursor: Option<(f32, f32)>) {
+        self.level = params.level;
+        self.size = (params.box_w, params.box_h);
         if self.area != area {
             self.area = area;
             self.rect = None;
@@ -236,6 +247,21 @@ mod tests {
             sectors[((ang + 22.5) / 45.0) as usize % 8] += 1;
         }
         assert!(sectors.iter().all(|n| *n >= 6), "{sectors:?}");
+    }
+
+    /// Distancia media del cursor a los blancos en un nivel.
+    fn mean_distance(level: usize) -> f32 {
+        let mut m = Flick::new(&Config::default(), fastrand::Rng::with_seed(level as u64 + 3));
+        m.area = Rect::new(0, 0, 160, 50);
+        m.level = Some(level);
+        let from = (80.0, 25.0);
+        (0..200).map(|_| cell_distance(from, center(&m.place(from)))).sum::<f32>() / 200.0
+    }
+
+    #[test]
+    fn higher_level_is_farther_from_cursor() {
+        let (easy, hard) = (mean_distance(0), mean_distance(9));
+        assert!(hard > easy * 1.8, "{easy} {hard}");
     }
 
     #[test]

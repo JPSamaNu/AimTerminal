@@ -111,10 +111,10 @@ o con `"background": "none"` y `"effects": false`, vuelve el estilo sobrio origi
 | reacción | velocidad pura, sin decisión ni puntería | 20 intentos | puntaje |
 | go/no-go | control de impulsos: responder al relleno, no al hueco | 30 intentos | comisiones y puntaje |
 
-- **Flick**: un solo blanco pequeño (4x2) lejos del cursor; las 8 direcciones salen
-  repartidas por igual. Un clic fuera es un fallo y el blanco se queda. Si no lo tocas en
-  3 s, es una omisión y aparece otro. Es el modo que mejor alimenta el análisis por
-  dirección.
+- **Flick**: un solo blanco lejos del cursor; las 8 direcciones salen repartidas por
+  igual. Un clic fuera es un fallo y el blanco se queda. Si no lo tocas en 3 s, es una
+  omisión y aparece otro. Es el modo que mejor alimenta el análisis por dirección. Tiene
+  dificultad propia (ver abajo).
 - **Seguimiento**: el recuadro avanza a 12 celdas/s, rebota y cambia de rumbo. Cada
   segundo se guarda la fracción del tiempo con el cursor encima y la distancia media.
   Es el único modo que redibuja seguido (unas 30 veces por segundo) mientras juegas.
@@ -166,6 +166,26 @@ El resumen de Blancos compara la mediana de los aciertos **cerca del centro** (r
 < 0.5) con los de **lejos**, y cada intento guarda su radio (0 centro, 1 borde) en el
 historial y en el CSV (`radius`). Una sesión solo se compara con otra de la misma
 dificultad (y en fija, del mismo nivel), porque la distancia cambia el tiempo.
+
+### Dificultad de Flick
+
+Igual que en Blancos, `dificultad` (←→) recorre fácil, normal, difícil, experto y
+adaptativa, con su propia configuración. Aquí el nivel hace dos cosas: **achica el
+blanco** y lo hace **salir más lejos del cursor**.
+
+| nivel | dificultad | blanco | distancia (parte del rango) |
+|---|---|---|---|
+| 1 | fácil | 6x3 | 5–45% |
+| 3 | normal | 5x2 | 15–65% |
+| 6 | difícil | 3x1 | 40–90% |
+| 9 | experto | 2x1 | 60–100% |
+
+El rango va de 8 celdas a un 60% de la diagonal del panel. Si en una dirección no cabe la
+distancia del nivel, el blanco se acerca lo justo. En adaptativa, la escalera es la de
+Blancos: 3 aciertos rápidos seguidos (hasta `flick_adapt_ms`, 850 ms) suben un nivel; un
+fallo, dejar pasar el blanco o un acierto muy lento bajan uno. Como cambian tamaño y
+distancia, el **rendimiento** (bits/s, ley de Fitts) es la mejor métrica para comparar
+entre niveles.
 
 ### Mejoras de medición
 
@@ -280,9 +300,10 @@ Todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de Windows):
   "targets_level": 3,
   "targets_adapt_ms": 900,
   "flick_trials": 30,
-  "flick_w": 4,
-  "flick_h": 2,
   "flick_timeout_ms": 3000,
+  "flick_difficulty": "adaptive",
+  "flick_level": 3,
+  "flick_adapt_ms": 850,
   "tracking_secs": 30,
   "tracking_w": 6,
   "tracking_h": 3,

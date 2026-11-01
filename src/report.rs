@@ -102,6 +102,9 @@ pub fn title(s: &Session, st: &Stats) -> String {
             s.cfg.difficulty_label().unwrap_or_default()
         ),
         GameKind::Tracking => format!("{} · {} s", kind.label(), s.cfg.session_secs().unwrap_or(0)),
+        GameKind::Flick => {
+            format!("{} · {} · {}", kind.label(), s.counted, s.cfg.difficulty_label().unwrap_or_default())
+        }
         _ => format!("{} · {}", kind.label(), s.counted),
     };
     if let (Difficulty::Adaptive, Some(l)) = (s.cfg.mode_difficulty(), s.final_level()) {

@@ -75,17 +75,47 @@ impl Staircase {
     }
 }
 
-/// Blancos adaptativo: un acierto rápido (hasta `fast_ms`) es un éxito; uno lento (más
-/// de 1.5 veces eso) o un clic en el vacío es un fallo; lo de en medio solo corta la racha.
-pub fn targets_signal(outcome: Outcome, rt_ms: Option<f64>, fast_ms: u64) -> Option<bool> {
+/// Blancos y Flick adaptativos: un acierto rápido (hasta `fast_ms`) es un éxito; uno
+/// lento (más de 1.5 veces eso), un clic en el vacío o dejar pasar el blanco es un fallo;
+/// lo de en medio solo corta la racha.
+pub fn speed_signal(outcome: Outcome, rt_ms: Option<f64>, fast_ms: u64) -> Option<bool> {
     let fast = fast_ms as f64;
     match (outcome, rt_ms) {
         (Outcome::Hit, Some(rt)) if rt <= fast => Some(true),
         (Outcome::Hit, Some(rt)) if rt > fast * 1.5 => Some(false),
         (Outcome::Hit, _) => None,
-        (Outcome::Miss | Outcome::Anticipation, _) => Some(false),
+        (Outcome::Miss | Outcome::Anticipation | Outcome::Omission, _) => Some(false),
         _ => None,
     }
+}
+
+/// Flick por nivel: ancho y alto del blanco, y en qué parte del rango de distancias
+/// sale (0 = lo más cerca del cursor, 1 = lo más lejos).
+const FLICK: [(u16, u16, f32, f32); 10] = [
+    (6, 3, 0.00, 0.35),
+    (6, 3, 0.05, 0.45),
+    (5, 2, 0.10, 0.55),
+    (5, 2, 0.15, 0.65),
+    (4, 2, 0.20, 0.75),
+    (4, 2, 0.30, 0.85),
+    (3, 1, 0.40, 0.90),
+    (3, 1, 0.50, 0.95),
+    (2, 1, 0.55, 1.00),
+    (2, 1, 0.60, 1.00),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlickLevel {
+    pub w: u16,
+    pub h: u16,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// Más nivel: blancos más pequeños y más lejos del cursor.
+pub fn flick_level(level: usize) -> FlickLevel {
+    let (w, h, near, far) = FLICK[level.min(MAX_LEVEL)];
+    FlickLevel { w, h, near, far }
 }
 
 /// Blancos: exponente con que se sortea la distancia al centro (r = u^e, con u uniforme).
@@ -175,11 +205,21 @@ mod tests {
     }
 
     #[test]
-    fn targets_signal_rewards_fast_hits() {
-        assert_eq!(targets_signal(Outcome::Hit, Some(600.0), 900), Some(true));
-        assert_eq!(targets_signal(Outcome::Hit, Some(1000.0), 900), None);
-        assert_eq!(targets_signal(Outcome::Hit, Some(1500.0), 900), Some(false));
-        assert_eq!(targets_signal(Outcome::Miss, Some(300.0), 900), Some(false));
+    fn speed_signal_rewards_fast_hits() {
+        assert_eq!(speed_signal(Outcome::Hit, Some(600.0), 900), Some(true));
+        assert_eq!(speed_signal(Outcome::Hit, Some(1000.0), 900), None);
+        assert_eq!(speed_signal(Outcome::Hit, Some(1500.0), 900), Some(false));
+        assert_eq!(speed_signal(Outcome::Miss, Some(300.0), 900), Some(false));
+        assert_eq!(speed_signal(Outcome::Omission, None, 900), Some(false));
+    }
+
+    #[test]
+    fn flick_gets_smaller_and_farther() {
+        for l in 1..=MAX_LEVEL {
+            let (a, b) = (flick_level(l - 1), flick_level(l));
+            assert!(b.w * b.h <= a.w * a.h && b.near >= a.near && b.far >= a.far);
+            assert!(b.near < b.far);
+        }
     }
 
     #[test]

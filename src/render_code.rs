@@ -90,7 +90,9 @@ fn run_cmd(cfg: &Config, baseline: bool) -> String {
     } else if cfg.mode.adaptive() {
         match (cfg.mode, cfg.mode_difficulty()) {
             (_, Difficulty::Adaptive) => cmd.push_str(" --adaptive"),
-            (GameKind::Targets, Difficulty::Fixed) => cmd.push_str(&format!(" --level {}", cfg.targets_level)),
+            (GameKind::Targets | GameKind::Flick, Difficulty::Fixed) => {
+                cmd.push_str(&format!(" --level {}", cfg.fixed_level().unwrap_or(0)))
+            }
             (_, Difficulty::Fixed) => cmd.push_str(" --fixed"),
         }
     }

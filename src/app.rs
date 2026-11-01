@@ -151,6 +151,17 @@ pub struct Session {
 
 impl Session {
     fn params(&self) -> Params {
+        if self.cfg.mode == GameKind::Flick {
+            let fl = difficulty::flick_level(self.level().unwrap_or(3));
+            return Params {
+                box_w: fl.w,
+                box_h: fl.h,
+                min_boxes: 1,
+                max_boxes: 1,
+                timeout: Duration::from_millis(self.cfg.flick_timeout_ms),
+                level: self.level(),
+            };
+        }
         if self.cfg.mode == GameKind::Targets {
             return Params {
                 box_w: self.cfg.targets_w,
@@ -186,8 +197,7 @@ impl Session {
     pub fn level(&self) -> Option<usize> {
         match (&self.stair, self.cfg.mode) {
             (Some(st), _) => Some(st.level),
-            (None, GameKind::Targets) => Some(self.cfg.targets_level),
-            _ => None,
+            (None, _) => self.cfg.fixed_level(),
         }
     }
 
@@ -195,10 +205,12 @@ impl Session {
     fn update_stair(&mut self, rec: &TrialRecord) {
         let Some(st) = self.stair.as_mut() else { return };
         match self.cfg.mode {
-            GameKind::Targets => match difficulty::targets_signal(rec.outcome, rec.rt_ms, self.cfg.targets_adapt_ms) {
-                Some(ok) => st.signal(ok),
-                None => st.reset_streak(),
-            },
+            GameKind::Targets | GameKind::Flick => {
+                match difficulty::speed_signal(rec.outcome, rec.rt_ms, self.cfg.adapt_ms().unwrap_or(900)) {
+                    Some(ok) => st.signal(ok),
+                    None => st.reset_streak(),
+                }
+            }
             _ => st.update(rec.outcome),
         }
     }
@@ -243,6 +255,10 @@ pub fn last_comparable<'a>(history: &'a [SessionRecord], cfg: &Config, baseline:
             GameKind::Targets => {
                 s.difficulty == difficulty
                     && (difficulty == Difficulty::Adaptive || s.config.targets_level == cfg.targets_level)
+            }
+            GameKind::Flick => {
+                s.difficulty == difficulty
+                    && (difficulty == Difficulty::Adaptive || s.config.flick_level == cfg.flick_level)
             }
             _ => true,
         };

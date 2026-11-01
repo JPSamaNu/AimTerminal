@@ -1,15 +1,17 @@
 //! Dibujo de las pantallas y de los elementos del juego.
 
-use crate::app::{App, MENU, PauseReason, ProgressView, Screen};
-use crate::config::{Difficulty, Fill};
+use crate::app::{self, App, MENU, MenuItem, PROGRESS_VIEWS, PauseReason, Screen, Session};
+use crate::config::{Difficulty, Fill, GameKind};
 use crate::history::SessionRecord;
+use crate::modes::Outcome;
+use crate::stats::{self, Stats};
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 
 pub const MIN_W: u16 = 40;
 pub const MIN_H: u16 = 12;
@@ -31,10 +33,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
     match app.screen {
         Screen::Menu => menu(f, app, area),
-        Screen::Countdown { left, .. } => {
-            centered(f, play_area(area), vec![Line::styled(left.to_string(), app.theme.dim())]);
-            status(f, app, area);
-        }
+        Screen::Countdown { left, .. } => countdown(f, app, area, left),
         Screen::Game => {
             if let Some(s) = &app.session {
                 s.mode.render(f.buffer_mut(), play_area(area), &app.theme);
@@ -43,11 +42,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
         Screen::Paused(reason) => paused(f, app, area, reason),
         Screen::Summary => summary(f, app, area),
-        Screen::Progress => {
-            if let Some(p) = &app.progress {
-                progress(f, app, p, area);
-            }
-        }
+        Screen::Progress => progress(f, app, area),
     }
 }
 
@@ -67,37 +62,145 @@ pub fn centered(f: &mut Frame, area: Rect, lines: Vec<Line>) {
     f.render_widget(Paragraph::new(lines), r);
 }
 
+/// Línea con prioridad: 0 siempre se muestra; las de número mayor se quitan primero
+/// cuando no hay espacio.
+type PLine = (Line<'static>, u8);
+
+/// Deja como mucho `height` líneas quitando primero las de mayor prioridad.
+fn fit(mut lines: Vec<PLine>, height: usize) -> Vec<Line<'static>> {
+    while lines.len() > height {
+        let worst = lines.iter().map(|(_, p)| *p).max().unwrap_or(0);
+        if worst == 0 {
+            lines.truncate(height);
+            break;
+        }
+        let i = lines.iter().rposition(|(_, p)| *p == worst).unwrap_or(lines.len() - 1);
+        lines.remove(i);
+    }
+    lines.into_iter().map(|(l, _)| l).collect()
+}
+
+/// Panel centrado con marco fino, título arriba y ayuda abajo. Si no cabe con marco,
+/// se dibuja sin él y las líneas opcionales se quitan.
+fn panel(f: &mut Frame, area: Rect, t: &Theme, title: &str, footer: &str, body: Vec<PLine>) {
+    let body_w = body.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
+    let w = body_w.max(title.chars().count() + 4).max(footer.chars().count() + 4) as u16;
+    let framed_w = w + 6;
+    let framed_h = body.len() as u16 + 4;
+    if framed_w <= area.width && framed_h <= area.height {
+        let r = Rect {
+            x: area.x + (area.width - framed_w) / 2,
+            y: area.y + (area.height - framed_h) / 2,
+            width: framed_w,
+            height: framed_h,
+        };
+        let block = Block::bordered()
+            .border_style(t.dim())
+            .title(Line::styled(format!(" {title} "), t.accent()))
+            .title_bottom(Line::styled(format!(" {footer} "), t.dim()));
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        let content = Rect { x: inner.x + 2, y: inner.y + 1, width: inner.width.saturating_sub(4), height: inner.height - 1 };
+        let lines: Vec<Line> = body.into_iter().map(|(l, _)| l).collect();
+        f.render_widget(Paragraph::new(lines), content);
+        return;
+    }
+    let mut lines: Vec<PLine> = vec![(Line::styled(title.to_string(), t.accent()), 0), (Line::raw(""), 3)];
+    lines.extend(body);
+    lines.push((Line::raw(""), 3));
+    lines.push((Line::styled(footer.to_string(), t.dim()), 0));
+    let lines = fit(lines, area.height as usize);
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0).min(area.width);
+    let h = lines.len() as u16;
+    let r = Rect { x: area.x + (area.width - width) / 2, y: area.y + (area.height - h) / 2, width, height: h };
+    f.render_widget(Paragraph::new(lines), r);
+}
+
+/// Etiqueta a la izquierda y valor alineado a la derecha en un ancho fijo.
+fn row(label: &str, value: &str, width: usize, ls: Style, vs: Style) -> Line<'static> {
+    let gap = width.saturating_sub(label.chars().count() + value.chars().count()).max(1);
+    Line::from(vec![Span::styled(label.to_string(), ls), Span::raw(" ".repeat(gap)), Span::styled(value.to_string(), vs)])
+}
+
 fn menu(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let mut lines = vec![Line::styled("rt", t.accent()), Line::raw("")];
+    const W: usize = 26;
+    let mut body: Vec<PLine> = Vec::new();
     for (i, item) in MENU.iter().enumerate() {
-        let label = if i == 3 { format!("{item}: {}", app.cfg.difficulty.label()) } else { item.to_string() };
-        let (mark, style) = if i == app.menu_idx { ("> ", t.accent()) } else { ("  ", t.dim()) };
-        lines.push(Line::from(vec![Span::styled(mark, t.dim()), Span::styled(label, style)]));
+        let selected = i == app.menu_idx;
+        let (label, value) = match item {
+            MenuItem::Start => ("empezar", String::new()),
+            MenuItem::Mode => ("modo", app.cfg.mode.label().to_string()),
+            MenuItem::Difficulty => (
+                "dificultad",
+                if app.cfg.mode == GameKind::Decision { app.cfg.difficulty.label().to_string() } else { "—".into() },
+            ),
+            MenuItem::Baseline => ("baseline", String::new()),
+            MenuItem::Progress => ("progreso", String::new()),
+            MenuItem::Quit => ("salir", String::new()),
+        };
+        let (mark, ls) = if selected { ("› ", t.accent()) } else { ("  ", t.dim()) };
+        let value = if selected && !value.is_empty() && value != "—" { format!("‹ {value} ›") } else { value };
+        let mut line = row(&format!("{mark}{label}"), &value, W, ls, if selected { t.accent() } else { t.text() });
+        line.spans.insert(0, Span::raw(""));
+        body.push((line, 0));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("↑↓ Enter · q salir", t.dim()));
-    centered(f, area, lines);
+    let last = app::last_comparable(&app.history, app.cfg.mode, false, app.cfg.difficulty);
+    if let Some(s) = last {
+        body.push((Line::raw(""), 2));
+        body.push((row("  último puntaje", &ms(s.stats.ies_ms), W, t.dim(), t.text()), 1));
+    }
+    panel(f, area, t, "rt", "↑↓ Enter · ←→ cambia · q", body);
+}
+
+fn mode_hint(kind: GameKind) -> &'static str {
+    match kind {
+        GameKind::Decision => "elige el relleno · clic o 1-9",
+        GameKind::Targets => "clic en los verdes · solo mouse",
+    }
+}
+
+fn countdown(f: &mut Frame, app: &App, area: Rect, left: u8) {
+    let t = &app.theme;
+    let mut lines = vec![Line::styled(left.to_string(), t.accent()), Line::raw("")];
+    if let Some(s) = &app.session {
+        lines.push(Line::styled(s.cfg.mode.label(), t.dim()));
+        lines.push(Line::styled(mode_hint(s.cfg.mode), t.dim()));
+    }
+    centered(f, play_area(area), lines);
+    status(f, app, area);
 }
 
 fn status(f: &mut Frame, app: &App, area: Rect) {
     let Some(s) = &app.session else { return };
-    let mut text = format!("{}/{}", s.records.len(), s.cfg.trials);
+    let mut text = match s.timer {
+        Some(timer) => {
+            let left = timer.shown_secs(std::time::Instant::now());
+            format!(
+                "{left:>2} s  {} aciertos  {} fallos",
+                s.count(Outcome::Hit),
+                s.count(Outcome::Miss) + s.count(Outcome::Anticipation)
+            )
+        }
+        None => format!("{}/{}", s.records.len(), s.cfg.trials),
+    };
     if s.baseline {
         text.push_str("  base");
     }
+    if let Some(l) = s.stair.as_ref().map(|st| st.level) {
+        text.push_str(&format!("  niv {l}"));
+    }
     if let Some(r) = &s.last {
-        text.push_str("  ");
+        text.push_str("  · ");
         text.push_str(r.outcome.label());
         if let (Some(ms), false) = (r.rt_ms, r.anticipation) {
             text.push_str(&format!(" {ms:.0}ms"));
         }
     }
-    let line = Line::from(vec![Span::styled(text, app.theme.dim())]);
-    f.render_widget(Paragraph::new(line), status_area(area));
-    let hint = "Esc pausa";
     let a = status_area(area);
-    if a.width as usize > hint.len() + 30 {
+    f.render_widget(Paragraph::new(Line::styled(text, app.theme.dim())), a);
+    let hint = "Esc pausa";
+    if a.width as usize > hint.len() + 44 {
         let r = Rect { x: a.x + a.width - hint.len() as u16, width: hint.len() as u16, ..a };
         f.render_widget(Paragraph::new(Line::styled(hint, app.theme.dim())), r);
     }
@@ -107,17 +210,17 @@ fn paused(f: &mut Frame, app: &App, area: Rect, reason: PauseReason) {
     let t = &app.theme;
     let why = match reason {
         PauseReason::User => "pausa",
-        PauseReason::FocusLost => "pausa (sin foco)",
-        PauseReason::TooSmall => "pausa (ventana pequeña)",
+        PauseReason::FocusLost => "pausa · sin foco",
+        PauseReason::TooSmall => "pausa · ventana pequeña",
     };
-    let lines = vec![
-        Line::styled(why, t.accent()),
-        Line::raw(""),
-        Line::styled("Enter seguir", t.dim()),
-        Line::styled("Esc terminar sesión", t.dim()),
-        Line::styled("q salir", t.dim()),
+    let body: Vec<PLine> = vec![
+        (row("seguir", "Enter", 24, t.text(), t.dim()), 0),
+        (row("terminar sesión", "Esc", 24, t.text(), t.dim()), 0),
+        (row("salir", "q", 24, t.text(), t.dim()), 0),
+        (Line::raw(""), 2),
+        (Line::styled("el intento en curso no cuenta", t.dim()), 1),
     ];
-    centered(f, play_area(area), lines);
+    panel(f, play_area(area), t, why, "Enter · Esc · q", body);
     status(f, app, area);
 }
 
@@ -129,69 +232,144 @@ fn pct(v: Option<f64>) -> String {
     v.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into())
 }
 
-/// Quita líneas vacías (y luego las últimas) si no cabe todo.
-fn fit(mut lines: Vec<Line<'static>>, height: u16) -> Vec<Line<'static>> {
-    while lines.len() > height as usize {
-        match lines.iter().rposition(|l| l.width() == 0) {
-            Some(i) => {
-                lines.remove(i);
-            }
-            None => lines.truncate(height as usize),
-        }
+/// Diferencia frente a la sesión anterior, en verde si mejora y en rojo si empeora.
+fn delta(t: &Theme, now: Option<f64>, before: Option<f64>, lower_is_better: bool, scale: f64) -> Span<'static> {
+    let (Some(a), Some(b)) = (now, before) else { return Span::raw("") };
+    let d = (a - b) * scale;
+    if d.abs() < 0.5 {
+        return Span::styled("  =", t.dim());
     }
-    lines
+    let better = (d < 0.0) == lower_is_better;
+    let style = if better { Style::default().fg(t.target) } else { Style::default().fg(t.distractor) };
+    Span::styled(format!(" {d:>+4.0}"), style)
+}
+
+const COL: usize = 22;
+
+/// Fila de métrica con su diferencia.
+fn metric(t: &Theme, label: &str, value: String, d: Span<'static>, strong: bool) -> Line<'static> {
+    let vs = if strong { t.accent().add_modifier(Modifier::BOLD) } else { t.text() };
+    let mut l = row(label, &value, COL, t.dim(), vs);
+    l.spans.push(d);
+    l
 }
 
 fn summary(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let Some(s) = &app.session else { return };
     let Some(st) = &s.stats else { return };
-    let mut head = format!("{} intentos · {}", st.trials, s.cfg.difficulty.label());
-    if s.baseline {
-        head = format!("baseline · {head}");
+    let (title, mut body) = match s.cfg.mode {
+        GameKind::Decision => summary_decision(t, s, st),
+        GameKind::Targets => summary_targets(t, s, st),
+    };
+    if s.prev.is_some() {
+        body.insert(0, (Line::styled(format!("{:>w$}", "vs anterior", w = COL + 12), t.dim()), 2));
     }
-    let mut lines = vec![Line::styled(head, t.accent())];
-    if let (Difficulty::Adaptive, Some(l)) = (s.cfg.difficulty, s.final_level()) {
-        lines.push(Line::styled(format!("nivel final {l}"), t.dim()));
-    }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(format!("mediana  {:>7}   media     {:>6}", ms(st.median_ms), ms(st.mean_ms)), t.text()));
-    lines.push(Line::styled(format!("mejor    {:>7}   precisión {:>6}", ms(st.best_ms), pct(st.accuracy)), t.text()));
-    lines.push(Line::styled(
-        format!("errores {}  omisiones {}  f.alarmas {}", st.errors, st.omissions, st.false_alarms),
-        t.text(),
-    ));
-    lines.push(Line::styled(
-        format!("rech.corr. {}/{}  anticip. {}  desc. {}", st.correct_rejections, st.catch_trials, st.anticipations, s.discarded),
-        t.text(),
-    ));
-    lines.push(Line::styled(format!("puntaje  {:>7}   (menor es mejor)", ms(st.ies_ms)), t.accent()));
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("los tiempos incluyen la latencia de la", t.dim()));
-    lines.push(Line::styled("terminal: compáralos solo contigo.", t.dim()));
+    body.push((Line::raw(""), 3));
+    body.push((Line::styled("los tiempos incluyen la latencia de la", t.dim()), 0));
+    body.push((Line::styled("terminal: compáralos solo contigo.", t.dim()), 0));
     if let Some(n) = &app.notice {
-        lines.push(Line::styled(n.clone(), t.accent()));
+        body.push((Line::styled(n.clone(), Style::default().fg(t.distractor)), 0));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled("Enter otra · p progreso · Esc menú", t.dim()));
-    centered(f, area, fit(lines, area.height));
+    panel(f, area, t, &title, "Enter otra · p progreso · Esc", body);
 }
 
-const SPARK: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+fn summary_decision(t: &Theme, s: &Session, st: &Stats) -> (String, Vec<PLine>) {
+    let p = s.prev.as_ref();
+    let mut title = format!("{} · {} · {}", s.cfg.mode.label(), s.cfg.difficulty.label(), st.trials);
+    if s.baseline {
+        title = format!("baseline · {} · {}", s.cfg.mode.label(), st.trials);
+    }
+    if let (Difficulty::Adaptive, Some(l)) = (s.cfg.difficulty, s.final_level()) {
+        title.push_str(&format!(" · niv {l}"));
+    }
+    let body = vec![
+        (metric(t, "mediana", ms(st.median_ms), delta(t, st.median_ms, p.and_then(|p| p.median_ms), true, 1.0), false), 0),
+        (metric(t, "media", ms(st.mean_ms), Span::raw(""), false), 2),
+        (metric(t, "mejor", ms(st.best_ms), Span::raw(""), false), 1),
+        (
+            metric(t, "precisión", pct(st.accuracy), delta(t, st.accuracy, p.and_then(|p| p.accuracy), false, 100.0), false),
+            0,
+        ),
+        (metric(t, "puntaje", ms(st.ies_ms), delta(t, st.ies_ms, p.and_then(|p| p.ies_ms), true, 1.0), true), 0),
+        (Line::raw(""), 3),
+        (
+            Line::styled(
+                format!("errores {} · omisiones {} · f.alarmas {}", st.errors, st.omissions, st.false_alarms),
+                t.dim(),
+            ),
+            0,
+        ),
+        (
+            Line::styled(
+                format!(
+                    "rech.corr. {}/{} · anticip. {} · desc. {}",
+                    st.correct_rejections, st.catch_trials, st.anticipations, s.discarded
+                ),
+                t.dim(),
+            ),
+            0,
+        ),
+    ];
+    (title, body)
+}
 
-/// Gráfica de una línea: cada carácter es una sesión, más alto = valor mayor.
-pub fn sparkline(values: &[Option<f64>]) -> String {
+fn summary_targets(t: &Theme, s: &Session, st: &Stats) -> (String, Vec<PLine>) {
+    let p = s.prev.as_ref();
+    let secs = s.timer.map(|tm| tm.total.as_secs_f64()).unwrap_or(s.cfg.targets_secs as f64);
+    let rate = if secs > 0.0 { st.hits as f64 / secs } else { 0.0 };
+    let title = format!("{} · {:.0} s", s.cfg.mode.label(), secs);
+    let hits = |x: &Stats| Some(x.hits as f64);
+    let body = vec![
+        (metric(t, "aciertos", st.hits.to_string(), delta(t, hits(st), p.and_then(hits), false, 1.0), false), 0),
+        (metric(t, "fallos", (st.misses + st.anticipations).to_string(), Span::raw(""), false), 0),
+        (
+            metric(t, "precisión", pct(st.accuracy), delta(t, st.accuracy, p.and_then(|p| p.accuracy), false, 100.0), false),
+            0,
+        ),
+        (metric(t, "ritmo", format!("{rate:.1}/s"), Span::raw(""), false), 1),
+        (
+            metric(
+                t,
+                "entre aciertos",
+                ms(st.median_ms),
+                delta(t, st.median_ms, p.and_then(|p| p.median_ms), true, 1.0),
+                false,
+            ),
+            0,
+        ),
+        (metric(t, "mejor", ms(st.best_ms), Span::raw(""), false), 2),
+        (metric(t, "puntaje", ms(st.ies_ms), delta(t, st.ies_ms, p.and_then(|p| p.ies_ms), true, 1.0), true), 0),
+        (Line::raw(""), 3),
+        (Line::styled(format!("anticip. {} · desc. {}", st.anticipations, s.discarded), t.dim()), 1),
+    ];
+    (title, body)
+}
+
+const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/// Gráfica de barras de `rows` filas: cada columna es una sesión, más alta = valor mayor.
+/// Devuelve las filas de arriba hacia abajo.
+pub fn bars(values: &[Option<f64>], rows: usize) -> Vec<String> {
+    let rows = rows.max(1);
+    let levels = rows * 8;
     let present: Vec<f64> = values.iter().flatten().copied().collect();
-    let (Some(lo), Some(hi)) = (present.iter().copied().reduce(f64::min), present.iter().copied().reduce(f64::max))
-    else {
-        return " ".repeat(values.len());
-    };
-    values
+    let lo = present.iter().copied().reduce(f64::min);
+    let hi = present.iter().copied().reduce(f64::max);
+    let heights: Vec<usize> = values
         .iter()
-        .map(|v| match v {
-            None => ' ',
-            Some(_) if (hi - lo).abs() < f64::EPSILON => SPARK[3],
-            Some(x) => SPARK[(((x - lo) / (hi - lo)) * 7.0).round() as usize],
+        .map(|v| match (v, lo, hi) {
+            (Some(x), Some(lo), Some(hi)) if (hi - lo).abs() >= f64::EPSILON => {
+                1 + (((x - lo) / (hi - lo)) * (levels - 1) as f64).round() as usize
+            }
+            (Some(_), _, _) => levels / 2,
+            (None, _, _) => 0,
+        })
+        .collect();
+    (0..rows)
+        .map(|r| {
+            let base = (rows - 1 - r) * 8;
+            heights.iter().map(|h| BARS[h.saturating_sub(base).min(8)]).collect()
         })
         .collect()
 }
@@ -200,47 +378,101 @@ fn short_date(d: &str) -> String {
     d.get(5..16).map(|x| x.replace('T', " ")).unwrap_or_else(|| d.to_string())
 }
 
-fn progress(f: &mut Frame, app: &App, p: &ProgressView, area: Rect) {
-    let t = &app.theme;
-    let list: Vec<&SessionRecord> = p.sessions.iter().filter(|s| !s.incomplete && s.baseline == p.baselines).collect();
-    let title = if p.baselines { "progreso · baselines" } else { "progreso · sesiones" };
-    let mut lines = vec![Line::from(vec![
-        Span::styled(title, t.accent()),
-        Span::styled(format!("  ({})  Tab cambia", list.len()), t.dim()),
-    ])];
-    lines.push(Line::raw(""));
-    let footer = if p.bad_lines > 0 {
-        format!("{} líneas dañadas ignoradas · Esc menú", p.bad_lines)
+/// Compara la última sesión con la mediana de las 5 anteriores.
+fn trend(t: &Theme, vals: &[f64], lower_is_better: bool) -> Span<'static> {
+    let Some((&last, before)) = vals.split_last() else { return Span::raw("") };
+    let window = &before[before.len().saturating_sub(5)..];
+    let Some(base) = stats::median(window) else { return Span::raw("") };
+    if base.abs() < f64::EPSILON || ((last - base) / base).abs() < 0.02 {
+        return Span::styled("estable", t.dim());
+    }
+    if (last < base) == lower_is_better {
+        Span::styled("mejora", Style::default().fg(t.target))
     } else {
-        "menor es mejor salvo precisión · Esc".to_string()
+        Span::styled("empeora", Style::default().fg(t.distractor))
+    }
+}
+
+fn progress(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let (kind, baseline) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
+    let list: Vec<&SessionRecord> =
+        app.history.iter().filter(|s| !s.incomplete && s.baseline == baseline && s.mode == kind.id()).collect();
+
+    let framed = area.width >= 50 && area.height >= 18;
+    let inner = if framed {
+        let block = Block::bordered()
+            .border_style(t.dim())
+            .title(Line::styled(" progreso ", t.accent()))
+            .title_bottom(Line::styled(" ←→ vista · Esc ", t.dim()));
+        let r = block.inner(area);
+        f.render_widget(block, area);
+        Rect { x: r.x + 2, y: r.y + 1, width: r.width.saturating_sub(4), height: r.height.saturating_sub(1) }
+    } else {
+        area
     };
+    let width = inner.width as usize;
+
+    let mut tabs = Vec::new();
+    for (i, (k, b)) in PROGRESS_VIEWS.iter().enumerate() {
+        let name = if *b { "baseline" } else { k.label() };
+        let style = if i == app.progress_view { t.accent().add_modifier(Modifier::UNDERLINED) } else { t.dim() };
+        tabs.push(Span::styled(name, style));
+        tabs.push(Span::raw("  "));
+    }
+    tabs.push(Span::styled(format!("({})", list.len()), t.dim()));
+    let mut lines: Vec<Line> = vec![Line::from(tabs), Line::raw("")];
+
     if list.is_empty() {
         lines.push(Line::styled("sin sesiones completas todavía", t.dim()));
     } else {
-        let spark_w = area.width.saturating_sub(11 + 8 + 2).clamp(4, 60) as usize;
-        let recent = &list[list.len().saturating_sub(spark_w)..];
-        let last = list[list.len() - 1];
-        let rows: [(&str, Vec<Option<f64>>, String); 3] = [
-            ("mediana", recent.iter().map(|s| s.stats.median_ms).collect(), ms(last.stats.median_ms)),
-            ("precisión", recent.iter().map(|s| s.stats.accuracy).collect(), pct(last.stats.accuracy)),
-            ("puntaje", recent.iter().map(|s| s.stats.ies_ms).collect(), ms(last.stats.ies_ms)),
+        let chart_rows = match inner.height {
+            h if h >= 30 => 3,
+            h if h >= 20 => 2,
+            _ => 1,
+        };
+        let recent = &list[list.len().saturating_sub(width)..];
+        let targets = kind == GameKind::Targets;
+        type Get = fn(&Stats) -> Option<f64>;
+        type Fmt = fn(Option<f64>) -> String;
+        let metrics: [(&str, Get, bool, Fmt); 3] = [
+            (if targets { "entre aciertos" } else { "mediana" }, |s| s.median_ms, true, ms),
+            ("precisión", |s| s.accuracy, false, pct),
+            ("puntaje", |s| s.ies_ms, true, ms),
         ];
-        for (label, vals, now) in rows {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{label:<10} "), t.dim()),
-                Span::styled(format!("{:<w$}", sparkline(&vals), w = spark_w), t.text()),
-                Span::styled(format!("{now:>8}"), t.accent()),
-            ]));
+        for (label, get, lower, fmt) in metrics {
+            let vals: Vec<Option<f64>> = recent.iter().map(|s| get(&s.stats)).collect();
+            let present: Vec<f64> = vals.iter().flatten().copied().collect();
+            let lo = present.iter().copied().reduce(f64::min);
+            let hi = present.iter().copied().reduce(f64::max);
+            let head = format!("{label:<15}{:>9}  ", fmt(vals.last().copied().flatten()));
+            let range = format!("{} – {}", fmt(lo), fmt(hi));
+            let mut spans = vec![Span::styled(head, t.text()), trend(t, &present, lower)];
+            let used: usize = spans.iter().map(|s| s.width()).sum();
+            if width > used + range.chars().count() + 2 {
+                spans.push(Span::raw(" ".repeat(width - used - range.chars().count())));
+                spans.push(Span::styled(range, t.dim()));
+            }
+            lines.push(Line::from(spans));
+            // Con pocas sesiones cada barra ocupa varias columnas para que se lea.
+            let col_w = (width / vals.len().max(1)).clamp(1, 3);
+            for b in bars(&vals, chart_rows) {
+                let wide: String = b.chars().flat_map(|c| std::iter::repeat_n(c, col_w)).collect();
+                lines.push(Line::styled(wide, Style::default().fg(t.dim)));
+            }
         }
         lines.push(Line::raw(""));
-        lines.push(Line::styled(format!("{:<11} {:>7} {:>5} {:>8}", "fecha UTC", "mediana", "prec", "puntaje"), t.dim()));
-        let room = (area.height as usize).saturating_sub(lines.len() + 2);
+        let second = if targets { "aciertos" } else { "mediana" };
+        lines.push(Line::styled(format!("{:<12}{:>9}{:>7}{:>10}", "fecha UTC", second, "prec", "puntaje"), t.dim()));
+        let reserve = if framed { 0 } else { 1 };
+        let room = (inner.height as usize).saturating_sub(lines.len() + reserve);
         for s in list.iter().rev().take(room) {
+            let second = if targets { s.stats.hits.to_string() } else { ms(s.stats.median_ms) };
             lines.push(Line::styled(
                 format!(
-                    "{:<11} {:>7} {:>5} {:>8}",
+                    "{:<12}{:>9}{:>7}{:>10}",
                     short_date(&s.date),
-                    ms(s.stats.median_ms),
+                    second,
                     pct(s.stats.accuracy),
                     ms(s.stats.ies_ms)
                 ),
@@ -248,12 +480,19 @@ fn progress(f: &mut Frame, app: &App, p: &ProgressView, area: Rect) {
             ));
         }
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(footer, t.dim()));
-    let lines = fit(lines, area.height);
-    let w = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0).min(area.width);
-    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y, width: w, height: area.height };
-    f.render_widget(Paragraph::new(lines), r);
+    if app.bad_lines > 0 {
+        lines.push(Line::styled(format!("{} líneas dañadas ignoradas", app.bad_lines), t.dim()));
+    }
+    lines.truncate(inner.height as usize);
+    if !framed {
+        let last = inner.height as usize - 1;
+        while lines.len() < last {
+            lines.push(Line::raw(""));
+        }
+        lines.truncate(last);
+        lines.push(Line::styled("←→ vista · Esc", t.dim()));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Punto de fijación en el centro.
@@ -265,8 +504,9 @@ pub fn fixation(buf: &mut Buffer, area: Rect, theme: &Theme) {
     }
 }
 
-/// Recuadro relleno o hueco hecho con caracteres de bloque, con su número al centro.
-pub fn draw_box(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: char) {
+/// Recuadro con caracteres de bloque: relleno macizo o marco fino de medio bloque,
+/// con su número (si lo tiene) al centro.
+pub fn draw_box(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: Option<char>) {
     let r = r.intersection(buf.area);
     if r.width == 0 || r.height == 0 {
         return;
@@ -275,25 +515,33 @@ pub fn draw_box(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: char
     let (right, bottom) = (r.x + r.width - 1, r.y + r.height - 1);
     for y in r.y..=bottom {
         for x in r.x..=right {
-            let edge_x = x == r.x || x == right;
+            let (top, bot, left, rgt) = (y == r.y, y == bottom, x == r.x, x == right);
             let ch = match fill {
                 Fill::Filled => '█',
-                Fill::Hollow if edge_x => '█',
-                Fill::Hollow if y == r.y => '▀',
-                Fill::Hollow if y == bottom => '▄',
-                Fill::Hollow => ' ',
+                Fill::Hollow => match (top, bot, left, rgt) {
+                    (true, _, true, _) => '▛',
+                    (true, _, _, true) => '▜',
+                    (_, true, true, _) => '▙',
+                    (_, true, _, true) => '▟',
+                    (true, _, _, _) => '▀',
+                    (_, true, _, _) => '▄',
+                    (_, _, true, _) => '▌',
+                    (_, _, _, true) => '▐',
+                    _ => ' ',
+                },
             };
             if let Some(c) = buf.cell_mut((x, y)) {
                 c.set_char(ch).set_style(style);
             }
         }
     }
+    let Some(label) = label else { return };
     let (lx, ly) = (r.x + r.width / 2, r.y + r.height / 2);
     if let Some(c) = buf.cell_mut((lx, ly)) {
         let st = match fill {
             // Número en negativo sobre el bloque relleno.
-            Fill::Filled => Style::default().fg(Color::Rgb(16, 16, 16)).bg(color),
-            Fill::Hollow => style,
+            Fill::Filled => Style::default().fg(Color::Rgb(16, 16, 16)).bg(color).add_modifier(Modifier::BOLD),
+            Fill::Hollow => style.add_modifier(Modifier::BOLD),
         };
         c.set_char(label).set_style(st);
     }
@@ -302,10 +550,8 @@ pub fn draw_box(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: char
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::app::App;
     use crate::config::Config;
-    use crate::modes::{Method, Outcome, TrialRecord};
+    use crate::modes::{Method, TrialRecord};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::time::Instant;
@@ -317,8 +563,11 @@ mod tests {
         (0..h)
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
             .collect::<Vec<_>>()
-            .join("
-")
+            .join("\n")
+    }
+
+    fn app(cfg: Config, w: u16, h: u16) -> App {
+        App::with_history(cfg, Rect::new(0, 0, w, h), std::env::temp_dir().join("rt-no-existe.jsonl"))
     }
 
     fn trial(outcome: Outcome, rt: Option<f64>) -> TrialRecord {
@@ -337,66 +586,102 @@ mod tests {
         }
     }
 
-    #[test]
-    fn summary_fits_minimum_panel() {
-        let mut app = App::new(Config::default(), Rect::new(0, 0, 40, 12));
-        app.start_session(false, Instant::now());
-        let s = app.session.as_mut().unwrap();
-        s.records = vec![trial(Outcome::Hit, Some(400.0)), trial(Outcome::Error, Some(300.0))];
-        s.stats = Some(crate::stats::compute(&s.records));
-        app.screen = Screen::Summary;
-        let text = screen_text(&app, 40, 12);
-        assert!(text.contains("mediana"), "{text}");
-        assert!(text.contains("puntaje"), "{text}");
-        assert!(text.contains("latencia"), "{text}");
-        assert!(text.contains("Esc"), "{text}");
-    }
-
-    #[test]
-    fn progress_separates_baselines_and_skips_incomplete() {
-        let mut app = App::new(Config::default(), Rect::new(0, 0, 40, 12));
-        let mk = |baseline, incomplete, med| crate::history::SessionRecord {
+    fn session_rec(mode: GameKind, baseline: bool, incomplete: bool, med: f64) -> SessionRecord {
+        SessionRecord {
             version: 1,
             date: "2026-11-01T10:00:00Z".into(),
-            mode: "decision".into(),
-            difficulty: crate::config::Difficulty::Fixed,
+            mode: mode.id().into(),
+            difficulty: Difficulty::Adaptive,
             baseline,
             incomplete,
             discarded: 0,
             final_level: None,
+            duration_s: None,
             pixel_mouse: false,
             config: Config::default(),
-            stats: crate::stats::Stats { median_ms: Some(med), accuracy: Some(1.0), ies_ms: Some(med), ..Default::default() },
+            stats: Stats { median_ms: Some(med), accuracy: Some(1.0), ies_ms: Some(med), hits: 7, ..Default::default() },
             trials: vec![],
-        };
-        app.progress = Some(ProgressView {
-            sessions: vec![mk(false, false, 410.0), mk(false, true, 999.0), mk(true, false, 520.0)],
-            bad_lines: 0,
-            baselines: false,
-        });
-        app.screen = Screen::Progress;
-        let text = screen_text(&app, 40, 12);
-        assert!(text.contains("(1)") && text.contains("410 ms"), "{text}");
-        assert!(!text.contains("999") && !text.contains("520"), "{text}");
-        app.progress.as_mut().unwrap().baselines = true;
-        let text = screen_text(&app, 40, 12);
-        assert!(text.contains("baselines") && text.contains("520 ms"), "{text}");
+        }
+    }
+
+    fn summary_text(mode: GameKind, w: u16, h: u16) -> String {
+        let mut a = app(Config { mode, ..Config::default() }, w, h);
+        a.history.push(session_rec(mode, false, false, 500.0));
+        a.start_session(false, Instant::now());
+        let s = a.session.as_mut().unwrap();
+        s.records = vec![trial(Outcome::Hit, Some(400.0)), trial(Outcome::Error, Some(300.0))];
+        s.stats = Some(stats::compute(&s.records));
+        a.screen = Screen::Summary;
+        screen_text(&a, w, h)
     }
 
     #[test]
-    fn sparkline_scales() {
+    fn summary_fits_minimum_panel_and_large_one() {
+        for (w, h) in [(40, 12), (100, 30)] {
+            let text = summary_text(GameKind::Decision, w, h);
+            for needle in ["mediana", "precisión", "puntaje", "latencia", "Esc", "-100"] {
+                assert!(text.contains(needle), "falta {needle} en {w}x{h}:\n{text}");
+            }
+        }
+        let text = summary_text(GameKind::Targets, 40, 12);
+        for needle in ["blancos", "aciertos", "puntaje", "latencia"] {
+            assert!(text.contains(needle), "falta {needle}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn menu_shows_mode_and_frames_when_room() {
+        let mut a = app(Config::default(), 80, 24);
+        a.menu_idx = 1;
+        let text = screen_text(&a, 80, 24);
+        assert!(text.contains("‹ decisión ›") && text.contains("┌"), "{text}");
+        let text = screen_text(&a, 40, 12);
+        assert!(text.contains("empezar") && text.contains("salir"), "{text}");
+    }
+
+    #[test]
+    fn progress_separates_modes_and_baselines() {
+        let mut a = app(Config::default(), 40, 12);
+        a.history = vec![
+            session_rec(GameKind::Decision, false, false, 410.0),
+            session_rec(GameKind::Decision, false, true, 999.0),
+            session_rec(GameKind::Decision, true, false, 520.0),
+            session_rec(GameKind::Targets, false, false, 640.0),
+        ];
+        a.screen = Screen::Progress;
+        for (view, has, hasnt) in [(0, "410 ms", ["999", "520", "640"]), (1, "520 ms", ["999", "410", "640"]), (2, "640 ms", ["999", "410", "520"])] {
+            a.progress_view = view;
+            for (w, h) in [(40, 12), (90, 30)] {
+                let text = screen_text(&a, w, h);
+                assert!(text.contains(has), "vista {view} {w}x{h}:\n{text}");
+                assert!(hasnt.iter().all(|x| !text.contains(x)), "vista {view} {w}x{h}:\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn bars_scale() {
+        let sparkline = |v: &[Option<f64>]| bars(v, 1).remove(0);
         assert_eq!(sparkline(&[Some(1.0), Some(2.0), None, Some(3.0)]), "▁▅ █");
         assert_eq!(sparkline(&[Some(5.0), Some(5.0)]), "▄▄");
         assert_eq!(sparkline(&[None, None]), "  ");
+        assert_eq!(bars(&[Some(0.0), Some(1.0)], 2), vec![" █", "▁█"]);
+    }
+
+    #[test]
+    fn fit_drops_optional_lines_first() {
+        let l = |s: &str| Line::raw(s.to_string());
+        let out = fit(vec![(l("a"), 0), (l(""), 3), (l("b"), 1), (l("c"), 0)], 3);
+        assert_eq!(out.iter().map(|x| x.to_string()).collect::<Vec<_>>(), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn hollow_box_shape() {
         let area = Rect::new(0, 0, 5, 3);
         let mut buf = Buffer::empty(area);
-        draw_box(&mut buf, area, Fill::Hollow, Color::Red, '2');
+        draw_box(&mut buf, area, Fill::Hollow, Color::Red, Some('2'));
         let rows: Vec<String> =
             (0..3).map(|y| (0..5).map(|x| buf[(x, y)].symbol().to_string()).collect()).collect();
-        assert_eq!(rows, vec!["█▀▀▀█", "█ 2 █", "█▄▄▄█"]);
+        assert_eq!(rows, vec!["▛▀▀▀▜", "▌ 2 ▐", "▙▄▄▄▟"]);
     }
 }

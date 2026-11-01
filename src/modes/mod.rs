@@ -1,11 +1,14 @@
 //! Modos de juego. La aplicación maneja la sesión (cuenta regresiva, pausa, descarte,
 //! guardado); cada modo maneja lo que pasa dentro de un intento.
 //!
-//! Para añadir un modo (Reacción pura, Blancos con clic, Seguimiento) basta con
-//! implementar [`GameMode`] y crearlo en `App::start_session`.
+//! Para añadir un modo (Reacción pura, Seguimiento) basta con implementar
+//! [`GameMode`], añadirlo a `GameKind` y crearlo en [`create`].
 
 pub mod decision;
+pub mod layout;
+pub mod targets;
 
+use crate::config::{Config, GameKind};
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -27,6 +30,8 @@ pub enum Outcome {
     CorrectRejection,
     /// Respondió antes del estímulo o más rápido que el umbral de anticipación.
     Anticipation,
+    /// Clic en un lugar vacío (modo Blancos).
+    Miss,
 }
 
 impl Outcome {
@@ -38,6 +43,7 @@ impl Outcome {
             Outcome::FalseAlarm => "falsa alarma",
             Outcome::CorrectRejection => "rechazo correcto",
             Outcome::Anticipation => "anticipación",
+            Outcome::Miss => "fallo",
         }
     }
 }
@@ -121,4 +127,11 @@ pub trait GameMode {
     /// Hay un intento en curso (fijación o estímulo).
     fn in_trial(&self) -> bool;
     fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme);
+}
+
+pub fn create(cfg: &Config, rng: fastrand::Rng) -> Box<dyn GameMode> {
+    match cfg.mode {
+        GameKind::Decision => Box::new(decision::Decision::new(cfg, rng)),
+        GameKind::Targets => Box::new(targets::Targets::new(cfg, rng)),
+    }
 }

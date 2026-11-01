@@ -1,6 +1,7 @@
 //! Modo Decisión: punto de fijación, espera aleatoria y de 3 a 5 recuadros; uno es el
 //! objetivo. En una parte de los intentos solo hay distractores y lo correcto es no responder.
 
+use super::layout::{center, cell_distance, contains, inner, layout};
 use super::{GameMode, Method, Outcome, Params, Response, Step, TrialRecord};
 use crate::config::{Config, Fill};
 use crate::render;
@@ -8,12 +9,6 @@ use crate::theme::Theme;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use std::time::{Duration, Instant};
-
-/// Separación mínima entre recuadros, en celdas.
-const GAP: u16 = 1;
-/// Altura mínima: con 3 filas el número cabe dentro de un recuadro hueco.
-const MIN_H: u16 = 3;
-const MIN_W: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
@@ -95,79 +90,6 @@ pub fn catch_schedule(n: usize, ratio: f64, rng: &mut fastrand::Rng) -> Vec<bool
     v
 }
 
-/// Coloca `n` recuadros de `w`x`h` dentro de `area` sin solaparse (con separación `GAP`).
-pub fn place_boxes(area: Rect, n: usize, w: u16, h: u16, rng: &mut fastrand::Rng) -> Option<Vec<Rect>> {
-    if w > area.width || h > area.height {
-        return None;
-    }
-    for _ in 0..30 {
-        let mut placed: Vec<Rect> = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mut ok = None;
-            for _ in 0..200 {
-                let x = area.x + rng.u16(0..=area.width - w);
-                let y = area.y + rng.u16(0..=area.height - h);
-                let r = Rect { x, y, width: w, height: h };
-                if placed.iter().all(|p| !overlaps_with_gap(p, &r)) {
-                    ok = Some(r);
-                    break;
-                }
-            }
-            match ok {
-                Some(r) => placed.push(r),
-                None => break,
-            }
-        }
-        if placed.len() == n {
-            return Some(placed);
-        }
-    }
-    None
-}
-
-fn overlaps_with_gap(a: &Rect, b: &Rect) -> bool {
-    let ax2 = a.x + a.width + GAP;
-    let ay2 = a.y + a.height + GAP;
-    let bx2 = b.x + b.width + GAP;
-    let by2 = b.y + b.height + GAP;
-    a.x < bx2 && b.x < ax2 && a.y < by2 && b.y < ay2
-}
-
-/// Intenta el tamaño pedido y lo reduce si no cabe (paneles pequeños).
-pub fn layout(area: Rect, n: usize, w: u16, h: u16, rng: &mut fastrand::Rng) -> Vec<Rect> {
-    let (mut w, mut h, mut n) = (w, h, n);
-    loop {
-        if let Some(v) = place_boxes(area, n, w, h, rng) {
-            return v;
-        }
-        if w > MIN_W {
-            w -= 1;
-        } else if h > MIN_H {
-            h -= 1;
-        } else if n > 2 {
-            n -= 1;
-        } else {
-            return place_boxes(area, 1, w.min(area.width), h.min(area.height), rng).unwrap_or_default();
-        }
-    }
-}
-
-fn inner(area: Rect) -> Rect {
-    if area.width > 2 && area.height > 2 {
-        Rect { x: area.x + 1, y: area.y + 1, width: area.width - 2, height: area.height - 2 }
-    } else {
-        area
-    }
-}
-
-fn center(r: &Rect) -> (f32, f32) {
-    (r.x as f32 + r.width as f32 / 2.0, r.y as f32 + r.height as f32 / 2.0)
-}
-
-fn contains(r: &Rect, x: f32, y: f32) -> bool {
-    x >= r.x as f32 && x < (r.x + r.width) as f32 && y >= r.y as f32 && y < (r.y + r.height) as f32
-}
-
 /// Clasifica una respuesta dada durante el estímulo.
 pub fn classify(target: Option<usize>, chosen: usize, rt: Duration, anticipation: Duration) -> Outcome {
     if rt < anticipation {
@@ -227,8 +149,7 @@ impl GameMode for Decision {
         self.phase = Phase::Stimulus { onset: now, deadline: now + self.params.timeout };
         self.cursor_dist = match (cursor, self.target) {
             (Some((cx, cy)), Some(t)) => {
-                let (tx, ty) = center(&self.boxes[t]);
-                Some(((tx - cx).powi(2) + (2.0 * (ty - cy)).powi(2)).sqrt())
+                Some(cell_distance((cx, cy), center(&self.boxes[t])))
             }
             _ => None,
         };
@@ -273,9 +194,9 @@ impl GameMode for Decision {
                 for (i, b) in self.boxes.iter().enumerate() {
                     let label = char::from_digit((i + 1) as u32, 10).unwrap_or(' ');
                     if Some(i) == self.target {
-                        render::draw_box(buf, *b, self.target_fill, theme.target, label);
+                        render::draw_box(buf, *b, self.target_fill, theme.target, Some(label));
                     } else {
-                        render::draw_box(buf, *b, self.distractor_fill, theme.distractor, label);
+                        render::draw_box(buf, *b, self.distractor_fill, theme.distractor, Some(label));
                     }
                 }
             }
@@ -290,40 +211,6 @@ mod tests {
 
     fn area(w: u16, h: u16) -> Rect {
         Rect { x: 0, y: 0, width: w, height: h }
-    }
-
-    #[test]
-    fn boxes_never_overlap_and_stay_inside() {
-        let mut rng = fastrand::Rng::with_seed(7);
-        for seed in 0..300 {
-            rng.seed(seed);
-            let a = area(rng.u16(40..=200), rng.u16(11..=60));
-            let n = rng.usize(3..=5);
-            let boxes = layout(a, n, 10, 5, &mut rng);
-            assert!(!boxes.is_empty());
-            for (i, b) in boxes.iter().enumerate() {
-                assert!(b.x + b.width <= a.width && b.y + b.height <= a.height, "fuera: {b:?} en {a:?}");
-                for c in &boxes[i + 1..] {
-                    assert!(!overlaps_with_gap(b, c), "solapados {b:?} {c:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn small_panel_shrinks_instead_of_failing() {
-        let mut rng = fastrand::Rng::with_seed(1);
-        let boxes = layout(area(38, 9), 5, 10, 5, &mut rng);
-        assert_eq!(boxes.len(), 5);
-    }
-
-    #[test]
-    fn gap_counts_as_overlap() {
-        let a = Rect { x: 0, y: 0, width: 4, height: 3 };
-        let touching = Rect { x: 4, y: 0, width: 4, height: 3 };
-        let apart = Rect { x: 5, y: 0, width: 4, height: 3 };
-        assert!(overlaps_with_gap(&a, &touching));
-        assert!(!overlaps_with_gap(&a, &apart));
     }
 
     #[test]

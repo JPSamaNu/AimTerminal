@@ -22,6 +22,9 @@ pub struct SessionRecord {
     pub discarded: usize,
     #[serde(default)]
     pub final_level: Option<usize>,
+    /// Duración activa en segundos (sesiones por tiempo).
+    #[serde(default)]
+    pub duration_s: Option<f64>,
     #[serde(default)]
     pub pixel_mouse: bool,
     pub config: Config,
@@ -152,6 +155,7 @@ mod tests {
             incomplete,
             discarded: 1,
             final_level: Some(3),
+            duration_s: None,
             pixel_mouse: false,
             config: Config::default(),
             stats: Stats::default(),

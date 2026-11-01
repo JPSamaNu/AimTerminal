@@ -33,9 +33,42 @@ impl Difficulty {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GameKind {
+    Decision,
+    Targets,
+}
+
+impl GameKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            GameKind::Decision => "decisión",
+            GameKind::Targets => "blancos",
+        }
+    }
+
+    /// Identificador que se guarda en el historial.
+    pub fn id(self) -> &'static str {
+        match self {
+            GameKind::Decision => "decision",
+            GameKind::Targets => "targets",
+        }
+    }
+
+    pub fn next(self) -> GameKind {
+        match self {
+            GameKind::Decision => GameKind::Targets,
+            GameKind::Targets => GameKind::Decision,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Modo de juego por defecto.
+    pub mode: GameKind,
     /// Intentos válidos por sesión.
     pub trials: usize,
     /// Tiempo límite por intento (modo fijo).
@@ -60,11 +93,17 @@ pub struct Config {
     pub distractor_color: String,
     /// Intentar el modo de mouse en píxeles (SGR-Pixels, 1016).
     pub pixel_mouse: bool,
+    /// Modo Blancos: cuántos verdes a la vez, duración y tamaño.
+    pub targets_count: usize,
+    pub targets_secs: u64,
+    pub targets_w: u16,
+    pub targets_h: u16,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
+            mode: GameKind::Decision,
             trials: 20,
             timeout_ms: 2000,
             anticipation_ms: 120,
@@ -83,6 +122,10 @@ impl Default for Config {
             target_color: "green".into(),
             distractor_color: "red".into(),
             pixel_mouse: false,
+            targets_count: 3,
+            targets_secs: 30,
+            targets_w: 6,
+            targets_h: 3,
         }
     }
 }
@@ -93,6 +136,7 @@ impl Config {
     pub fn baseline(&self) -> Config {
         let d = Config::default();
         Config {
+            mode: GameKind::Decision,
             trials: 30,
             difficulty: Difficulty::Fixed,
             theme: self.theme,
@@ -114,7 +158,11 @@ impl Config {
         self.max_boxes = self.max_boxes.clamp(self.min_boxes, 9);
         self.fixation_max_ms = self.fixation_max_ms.max(self.fixation_min_ms);
         self.box_w = self.box_w.clamp(3, 20);
-        self.box_h = self.box_h.clamp(2, 10);
+        self.box_h = self.box_h.clamp(3, 10);
+        self.targets_count = self.targets_count.clamp(1, 9);
+        self.targets_secs = self.targets_secs.clamp(5, 600);
+        self.targets_w = self.targets_w.clamp(3, 20);
+        self.targets_h = self.targets_h.clamp(3, 10);
     }
 }
 
@@ -171,10 +219,12 @@ rt - práctica de decisión y reflejos
 uso:
   rt [opciones]          abre el menú
   rt --quick             empieza una sesión de inmediato
-  rt --baseline          prueba base fija (30 intentos)
+  rt --baseline          prueba base de decisión (30 intentos)
+  rt --mode blancos      modo Blancos: varios verdes, 30 s, solo mouse
   rt export [-o ARCHIVO] exporta los intentos a CSV (stdout por defecto)
 
 opciones:
+  --mode decision|blancos  modo de juego
   --theme dark|mono      paleta
   --trials N             intentos por sesión
   --timeout MS           tiempo límite por intento (modo fijo)
@@ -184,6 +234,14 @@ opciones:
   -V, --version          versión
 
 teclas: 1-9 o clic para responder, Esc pausa, q sale";
+
+fn parse_mode(v: Option<&str>) -> Result<GameKind, String> {
+    match v {
+        Some("decision" | "decisión" | "d") => Ok(GameKind::Decision),
+        Some("blancos" | "targets" | "b") => Ok(GameKind::Targets),
+        other => Err(format!("modo desconocido: {}", other.unwrap_or(""))),
+    }
+}
 
 /// Aplica los argumentos sobre la configuración.
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I, cfg: &mut Config) -> Result<Cli, String> {
@@ -198,6 +256,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, cfg: &mut Config) -> 
             }
             "--quick" | "-q" => cli.quick = true,
             "--baseline" => cli.baseline = true,
+            "--mode" | "-m" => cfg.mode = parse_mode(it.next().as_deref())?,
             "--theme" => {
                 cfg.theme = match it.next().as_deref() {
                     Some("mono") => ThemeName::Mono,
@@ -240,7 +299,10 @@ mod tests {
     #[test]
     fn parses_flags() {
         let mut c = Config::default();
-        let cli = parse_args(args(&["--quick", "--theme", "mono", "--trials", "10", "--fixed"]), &mut c).unwrap();
+        let cli =
+            parse_args(args(&["--quick", "--theme", "mono", "--trials", "10", "--fixed", "--mode", "blancos"]), &mut c)
+                .unwrap();
+        assert_eq!(c.mode, GameKind::Targets);
         assert!(cli.quick);
         assert_eq!(c.theme, ThemeName::Mono);
         assert_eq!(c.trials, 10);

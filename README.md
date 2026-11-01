@@ -38,7 +38,8 @@ cargo clippy --all-targets
 ```
 rt                     menú
 rt --quick             empieza una sesión de inmediato
-rt --baseline          prueba base fija: 30 intentos, sin adaptación
+rt --baseline          prueba base de Decisión: 30 intentos, sin adaptación
+rt --mode blancos      modo Blancos (también se elige en el menú)
 rt export              intentos a CSV por stdout
 rt export -o out.csv   intentos a un archivo
 rt --theme mono        un solo color
@@ -52,9 +53,26 @@ La diferencia no depende solo del color: con `--theme mono` se distinguen por el
 Responde con un clic sobre el objetivo o con la tecla de su número.
 En el ~17% de los intentos no hay objetivo: lo correcto es no responder.
 
+### Modo Blancos
+
+Hay 3 recuadros verdes a la vez durante 30 s. Al hacer clic en uno, solo ese cambia de
+lugar, y nunca aparece bajo el cursor. Es solo con mouse. Un clic en el vacío cuenta
+como fallo. Cada clic es un intento: su tiempo se mide desde que se dibujó el cuadro
+anterior, y la distancia se mide desde el cursor en ese momento hasta el blanco, así que
+sirve para ver el tiempo frente a la distancia y el tamaño. El reloj se detiene en pausa.
+El resumen muestra aciertos, fallos, precisión, ritmo (aciertos por segundo), mediana
+entre aciertos y el mismo puntaje combinado. Se configura con `targets_count`,
+`targets_secs`, `targets_w` y `targets_h`.
+
 Teclas: `1`–`9` responder · `Esc` pausa (otra vez `Esc` termina la sesión) · `q` sale
 de inmediato · en el resumen `Enter` repite y `p` abre el progreso · en el progreso
-`Tab` alterna entre sesiones y baselines.
+`←→` o `Tab` cambia entre decisión, baseline y blancos. En el menú, `←→` cambia el modo
+y la dificultad.
+
+El resumen compara cada métrica con la sesión anterior del mismo modo y dificultad
+(verde si mejora, rojo si empeora). El progreso muestra, por métrica, el último valor,
+la tendencia frente a la mediana de las 5 sesiones anteriores, el rango y una gráfica
+de barras que crece en altura cuando el panel es grande.
 
 Si sales a mitad de una sesión, se guarda marcada como incompleta y no entra al progreso.
 Si la terminal pierde el foco o cambia de tamaño durante un intento, ese intento se
@@ -70,6 +88,7 @@ descarta y no cuenta; al perder el foco la sesión se pausa.
 | falsa alarma | respondió sin objetivo presente |
 | rechazo correcto | no respondió sin objetivo presente |
 | anticipación | respondió antes del estímulo o en menos de 120 ms |
+| fallo | clic en el vacío (modo Blancos) |
 
 Las anticipaciones no cuentan como acierto ni entran a los tiempos; se reportan aparte.
 El resumen muestra mediana, media, mejor tiempo, precisión (aciertos / intentos con
@@ -100,6 +119,7 @@ Todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de Windows):
 
 ```json
 {
+  "mode": "decision",
   "trials": 20,
   "timeout_ms": 2000,
   "anticipation_ms": 120,
@@ -117,7 +137,11 @@ Todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de Windows):
   "distractor_fill": "hollow",
   "target_color": "green",
   "distractor_color": "red",
-  "pixel_mouse": false
+  "pixel_mouse": false,
+  "targets_count": 3,
+  "targets_secs": 30,
+  "targets_w": 6,
+  "targets_h": 3
 }
 ```
 
@@ -151,12 +175,14 @@ src/
   theme.rs         paletas
   app.rs           pantallas, sesión y bucle dirigido por eventos
   modes/mod.rs     trait GameMode y tipos comunes de intento
-  modes/decision.rs  modo Decisión, colocación de recuadros
+  modes/layout.rs  colocación de recuadros sin solaparse
+  modes/decision.rs  modo Decisión
+  modes/targets.rs   modo Blancos
   difficulty.rs    niveles y escalera
   stats.rs         estadísticas
   history.rs       JSON Lines y CSV
 ```
 
-Para añadir un modo (Reacción pura, Blancos con clic, Seguimiento), implementa
-`GameMode` en `src/modes/` y créalo en `App::start_session`. La sesión, la pausa, el
-descarte, la escalera, las estadísticas y el historial no cambian.
+Para añadir un modo (Reacción pura, Seguimiento), implementa `GameMode` en
+`src/modes/`, añádelo a `GameKind` y créalo en `modes::create`. La sesión, la pausa,
+el descarte, el reloj, las estadísticas y el historial no cambian.

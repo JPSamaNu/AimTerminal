@@ -55,7 +55,7 @@ impl Staircase {
                 }
             }
             Outcome::CorrectRejection => {}
-            Outcome::Error | Outcome::Omission | Outcome::FalseAlarm | Outcome::Anticipation => {
+            Outcome::Error | Outcome::Omission | Outcome::FalseAlarm | Outcome::Anticipation | Outcome::Miss => {
                 self.level = self.level.saturating_sub(1);
                 self.streak = 0;
             }

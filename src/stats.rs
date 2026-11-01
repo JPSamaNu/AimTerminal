@@ -15,6 +15,8 @@ pub struct Stats {
     pub false_alarms: usize,
     pub correct_rejections: usize,
     pub anticipations: usize,
+    /// Clics en el vacío (modo Blancos).
+    pub misses: usize,
     /// Tiempos de los aciertos (sin anticipaciones).
     pub median_ms: Option<f64>,
     pub mean_ms: Option<f64>,
@@ -68,6 +70,7 @@ pub fn compute(records: &[TrialRecord]) -> Stats {
             Outcome::FalseAlarm => s.false_alarms += 1,
             Outcome::CorrectRejection => s.correct_rejections += 1,
             Outcome::Anticipation => s.anticipations += 1,
+            Outcome::Miss => s.misses += 1,
         }
     }
     s.median_ms = median(&hit_rts);

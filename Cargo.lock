@@ -338,6 +338,8 @@ name = "rt"
 version = "0.1.0"
 dependencies = [
  "fastrand",
+ "parking_lot",
+ "parking_lot_core",
  "ratatui",
  "serde",
  "serde_json",

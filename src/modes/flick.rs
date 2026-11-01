@@ -37,6 +37,8 @@ pub struct Flick {
     completed: usize,
     flashes: Vec<Flash>,
     level: Option<usize>,
+    /// Direcciones que salen el doble de veces (plan de entrenamiento).
+    focus: Vec<usize>,
 }
 
 impl Flick {
@@ -54,12 +56,14 @@ impl Flick {
             completed: 0,
             flashes: Vec::new(),
             level: None,
+            focus: cfg.flick_focus.clone(),
         }
     }
 
     fn next_direction(&mut self) -> usize {
         if self.bag.is_empty() {
-            self.bag = (0..8).collect();
+            // Las 8 direcciones una vez y las de enfoque una vez más.
+            self.bag = (0..8).chain(self.focus.iter().copied()).collect();
             self.rng.shuffle(&mut self.bag);
         }
         self.bag.pop().unwrap_or(0)
@@ -262,6 +266,18 @@ mod tests {
     fn higher_level_is_farther_from_cursor() {
         let (easy, hard) = (mean_distance(0), mean_distance(9));
         assert!(hard > easy * 1.8, "{easy} {hard}");
+    }
+
+    #[test]
+    fn focus_directions_come_twice_as_often() {
+        let cfg = Config { flick_focus: vec![5], ..Config::default() };
+        let mut m = Flick::new(&cfg, fastrand::Rng::with_seed(1));
+        let mut count = [0; 8];
+        for _ in 0..90 {
+            count[m.next_direction()] += 1;
+        }
+        assert_eq!(count[5], 20);
+        assert!(count.iter().enumerate().all(|(d, n)| d == 5 || *n == 10), "{count:?}");
     }
 
     #[test]

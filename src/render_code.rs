@@ -35,6 +35,8 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Screen::Summary => summary(f, app, area),
         Screen::Progress => progress(f, app, area),
         Screen::Aim => aim_screen(f, app, area),
+        Screen::Plan => plan_screen(f, app, area),
+        Screen::PlanDone => plan_done(f, app, area),
     }
 }
 
@@ -119,6 +121,7 @@ fn menu(f: &mut Frame, app: &App, area: Rect) {
                 app.cfg.difficulty_label().map(|l| format!("{l}  ←→")).unwrap_or_else(|| "-".to_string()),
             ),
             MenuItem::Baseline => ("baseline", format!("prueba base fija ({})", app.cfg.baseline_mode().id())),
+            MenuItem::Plan => ("plan", "rutina según tus puntos débiles".to_string()),
             MenuItem::Progress => ("log", "progreso".to_string()),
             MenuItem::Aim => ("aim", "puntería por dirección".to_string()),
             MenuItem::Quit => ("exit", "salir".to_string()),
@@ -299,7 +302,12 @@ fn summary(f: &mut Frame, app: &App, area: Rect) {
         ]),
         0,
     ));
-    lines.push((Line::styled("Enter rerun · p log · a aim · Esc", t.dim()), 0));
+    let footer = match (&app.plan, app.next_block()) {
+        (Some(p), Some(i)) => format!("Enter next block ({}/{}) · Esc abort plan", i + 1, p.blocks.len()),
+        (Some(_), None) => "Enter finish plan · Esc".to_string(),
+        (None, _) => "Enter rerun · p log · a aim · Esc".to_string(),
+    };
+    lines.push((Line::styled(footer, t.dim()), 0));
     output(f, area, lines);
 }
 
@@ -382,6 +390,54 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
     // El pie siempre visible: va al final y las filas del log (prioridad 5) ceden primero.
     lines.push((Line::styled("←→ vista · d dific. · w semanas · Esc", t.dim()), 0));
     let lines = fit_keep_order(lines, area.height as usize);
+    output(f, area, lines);
+}
+
+fn plan_screen(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let Some(p) = &app.plan else { return };
+    let mut lines: Vec<PLine> = vec![(prompt(app, "rt plan", area.width), 0)];
+    lines.push((
+        verb(
+            t,
+            "Planning",
+            format!("{} blocks (~{} min)", p.blocks.len(), crate::render::plan_minutes(&p.blocks)),
+            t.text(),
+        ),
+        0,
+    ));
+    for (i, b) in p.blocks.iter().enumerate() {
+        let level = b.cfg.difficulty_label().filter(|_| area.width >= 60).map(|l| format!(" [{l}]")).unwrap_or_default();
+        lines.push((
+            Line::from(vec![
+                Span::styled(format!("{:>12} ", format!("{}/{}", i + 1, p.blocks.len())), t.accent()),
+                Span::styled(format!("{} ({}){level}", b.kind().id(), b.size_label()), t.text()),
+            ]),
+            0,
+        ));
+        lines.push((Line::styled(format!("{:>13}# {}", "", b.reason), t.dim()), 1));
+    }
+    lines.push((Line::raw(""), 3));
+    lines.push((Line::styled("Enter run · Esc", t.dim()), 0));
+    output(f, area, lines);
+}
+
+fn plan_done(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let Some(p) = &app.plan else { return };
+    let mut lines: Vec<PLine> = vec![(prompt(app, "rt plan", area.width), 1)];
+    for (mode, name, value) in &p.results {
+        lines.push((
+            Line::from(vec![
+                Span::styled(format!("{:>12} ", "ok"), Style::default().fg(t.target).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{mode:<12} "), t.text()),
+                Span::styled(format!("{}={}", name.replace(' ', "_"), value.replace(' ', "")), t.accent()),
+            ]),
+            0,
+        ));
+    }
+    lines.push((verb(t, "Finished", format!("plan: {} blocks", p.results.len()), t.text()), 0));
+    lines.push((Line::styled("Enter menu", t.dim()), 0));
     output(f, area, lines);
 }
 

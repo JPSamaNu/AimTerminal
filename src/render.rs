@@ -52,7 +52,41 @@ pub fn draw(f: &mut Frame, app: &App) {
         Screen::Summary => summary(f, app, area),
         Screen::Progress => progress(f, app, area),
         Screen::Aim => aim_screen(f, app, area),
+        Screen::Plan => plan_screen(f, app, area),
+        Screen::PlanDone => plan_done(f, app, area),
     }
+}
+
+/// Minutos aproximados de un plan, redondeando hacia arriba.
+pub(crate) fn plan_minutes(blocks: &[crate::plan::Block]) -> u64 {
+    blocks.iter().map(|b| b.est_secs()).sum::<u64>().div_ceil(60)
+}
+
+fn plan_screen(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let Some(p) = &app.plan else { return };
+    let mut body: Vec<PLine> = Vec::new();
+    for (i, b) in p.blocks.iter().enumerate() {
+        let head = format!("{}  {} · {}", i + 1, b.kind().label(), b.size_label());
+        let level = b.cfg.difficulty_label().map(|l| format!("  {l}")).unwrap_or_default();
+        body.push((Line::from(vec![Span::styled(head, t.text()), Span::styled(level, t.dim())]), 0));
+        body.push((Line::styled(format!("   {}", b.reason), t.dim()), 1));
+    }
+    body.push((Line::raw(""), 3));
+    body.push((Line::styled(format!("unos {} min · cada bloque se guarda", plan_minutes(&p.blocks)), t.dim()), 2));
+    panel(f, area, t, "plan de hoy", "Enter empezar · Esc", body);
+}
+
+fn plan_done(f: &mut Frame, app: &App, area: Rect) {
+    let t = &app.theme;
+    let Some(p) = &app.plan else { return };
+    let mut body: Vec<PLine> = Vec::new();
+    for (mode, name, value) in &p.results {
+        body.push((row(mode, &format!("{name} {value}"), 30, t.text(), t.accent()), 0));
+    }
+    body.push((Line::raw(""), 3));
+    body.push((Line::styled("el detalle de cada bloque está en el progreso", t.dim()), 2));
+    panel(f, area, t, "plan completo", "Enter menú", body);
 }
 
 fn too_small(f: &mut Frame, app: &App, area: Rect) {
@@ -310,6 +344,7 @@ fn menu(f: &mut Frame, app: &App, area: Rect) {
             MenuItem::Mode => ("modo", app.cfg.mode.label().to_string()),
             MenuItem::Difficulty => ("dificultad", app.cfg.difficulty_label().unwrap_or_else(|| "—".into())),
             MenuItem::Baseline => ("baseline", app.cfg.baseline_mode().label().to_string()),
+            MenuItem::Plan => ("plan de hoy", String::new()),
             MenuItem::Progress => ("progreso", String::new()),
             MenuItem::Aim => ("puntería", String::new()),
             MenuItem::Quit => ("salir", String::new()),
@@ -487,7 +522,16 @@ fn summary(f: &mut Frame, app: &App, area: Rect) {
     if let Some(n) = &app.notice {
         body.push((Line::styled(n.clone(), Style::default().fg(t.distractor)), 0));
     }
-    panel(f, area, t, &title, "Enter otra · p progreso · a aim · Esc", body);
+    let footer = match (&app.plan, app.next_block()) {
+        (Some(p), Some(i)) => format!("Enter bloque {}/{} · Esc salir", i + 1, p.blocks.len()),
+        (Some(_), None) => "Enter terminar plan · Esc".to_string(),
+        (None, _) => "Enter otra · p progreso · a aim · Esc".to_string(),
+    };
+    let title = match &app.plan {
+        Some(p) => format!("plan {}/{} · {title}", p.current + 1, p.blocks.len()),
+        None => title,
+    };
+    panel(f, area, t, &title, &footer, body);
 }
 
 const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];

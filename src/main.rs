@@ -7,6 +7,7 @@ mod difficulty;
 mod history;
 mod input;
 mod modes;
+mod plan;
 mod render;
 mod report;
 mod render_code;
@@ -56,7 +57,7 @@ fn main() -> ExitCode {
             } else {
                 None
             };
-            if let Err(e) = run_tui(cfg, start) {
+            if let Err(e) = run_tui(cfg, start, cli.plan) {
                 eprintln!("error: {e}");
                 return ExitCode::FAILURE;
             }
@@ -65,11 +66,14 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_tui(cfg: config::Config, start: Option<bool>) -> std::io::Result<()> {
+fn run_tui(cfg: config::Config, start: Option<bool>, plan: bool) -> std::io::Result<()> {
     let mut term = term::init()?;
     let _guard = term::Guard;
     let size = term.size()?;
     let mut app = app::App::new(cfg, ratatui::layout::Rect::new(0, 0, size.width, size.height));
+    if plan && start.is_none() {
+        app.open_plan();
+    }
     app::run(&mut term, &mut app, start)
 }
 

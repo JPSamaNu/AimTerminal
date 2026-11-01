@@ -24,16 +24,18 @@ pub enum MenuItem {
     Mode,
     Difficulty,
     Baseline,
+    Plan,
     Progress,
     Aim,
     Quit,
 }
 
-pub const MENU: [MenuItem; 7] = [
+pub const MENU: [MenuItem; 8] = [
     MenuItem::Start,
     MenuItem::Mode,
     MenuItem::Difficulty,
     MenuItem::Baseline,
+    MenuItem::Plan,
     MenuItem::Progress,
     MenuItem::Aim,
     MenuItem::Quit,
@@ -68,6 +70,18 @@ pub enum Screen {
     Summary,
     Progress,
     Aim,
+    /// Vista previa del plan de entrenamiento.
+    Plan,
+    /// Plan terminado: resumen de los bloques.
+    PlanDone,
+}
+
+/// Plan de entrenamiento en curso.
+pub struct PlanState {
+    pub blocks: Vec<crate::plan::Block>,
+    pub current: usize,
+    /// Métrica principal de cada bloque terminado: (modo, nombre, valor).
+    pub results: Vec<(String, String, String)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,7 +304,9 @@ pub fn last_comparable<'a>(history: &'a [SessionRecord], cfg: &Config, baseline:
             }
             _ => true,
         };
-        !s.incomplete && s.mode == mode.id() && s.baseline == baseline && same_difficulty
+        // Los bloques del plan son más cortos: solo se comparan entre ellos.
+        let same_kind = s.config.plan_block == cfg.plan_block;
+        !s.incomplete && s.mode == mode.id() && s.baseline == baseline && same_difficulty && same_kind
     })
 }
 
@@ -319,6 +335,7 @@ pub struct App {
     pub progress_filter: Option<String>,
     /// Progreso agrupado por semana en vez de por sesión.
     pub progress_weekly: bool,
+    pub plan: Option<PlanState>,
     /// Análisis de puntería abierto y a qué pantalla volver.
     pub aim: Option<AimReport>,
     aim_back: Screen,
@@ -363,6 +380,7 @@ impl App {
             progress_view: 0,
             progress_filter: None,
             progress_weekly: false,
+            plan: None,
             aim: None,
             aim_back: Screen::Menu,
             notice: None,
@@ -383,6 +401,10 @@ impl App {
 
     pub fn start_session(&mut self, baseline: bool, now: Instant) {
         let cfg = if baseline { self.cfg.baseline() } else { self.cfg.clone() };
+        self.start_with(cfg, baseline, now);
+    }
+
+    fn start_with(&mut self, cfg: Config, baseline: bool, now: Instant) {
         let mode = modes::create(&cfg, fastrand::Rng::new());
         // La escalera empieza un nivel por debajo de donde terminó la sesión anterior.
         let stair = (cfg.mode.adaptive() && cfg.mode_difficulty() == Difficulty::Adaptive)
@@ -506,11 +528,46 @@ impl App {
             }
         }
         if complete {
+            if let Some(p) = self.plan.as_mut() {
+                let (metrics, _) = report::summary(s, &st);
+                let main = metrics.iter().find(|m| m.strong).or(metrics.first());
+                p.results.push((
+                    s.cfg.mode.label().to_string(),
+                    main.map(|m| m.label.to_string()).unwrap_or_default(),
+                    main.map(|m| m.value.clone()).unwrap_or_default(),
+                ));
+            }
             s.stats = Some(st);
             self.screen = Screen::Summary;
         } else {
             self.session = None;
+            // Salir a mitad de un bloque abandona el plan.
+            self.plan = None;
         }
+    }
+
+    /// Arma el plan de hoy con el historial y el análisis de puntería.
+    pub fn open_plan(&mut self) {
+        let aim = self.recent_aim();
+        let blocks = crate::plan::build(&self.cfg, &self.history, &aim, &history::now_iso());
+        self.plan = Some(PlanState { blocks, current: 0, results: Vec::new() });
+        self.screen = Screen::Plan;
+    }
+
+    fn start_block(&mut self, i: usize, now: Instant) {
+        let Some(cfg) = self.plan.as_mut().and_then(|p| {
+            p.current = i;
+            p.blocks.get(i).map(|b| b.cfg.clone())
+        }) else {
+            return;
+        };
+        self.start_with(cfg, false, now);
+    }
+
+    /// Bloque siguiente del plan, si queda alguno.
+    pub fn next_block(&self) -> Option<usize> {
+        let p = self.plan.as_ref()?;
+        (p.current + 1 < p.blocks.len()).then_some(p.current + 1)
     }
 
     fn open_progress(&mut self) {
@@ -561,6 +618,12 @@ impl App {
     /// Analiza la puntería con los intentos de las últimas sesiones completas (de todos
     /// los modos con mouse), leyendo el historial con el detalle de cada intento.
     fn open_aim(&mut self) {
+        self.aim = Some(self.recent_aim());
+        self.aim_back = self.screen;
+        self.screen = Screen::Aim;
+    }
+
+    fn recent_aim(&self) -> AimReport {
         let (all, _) = history::load(&self.history_path);
         let recent: Vec<&SessionRecord> = all
             .iter()
@@ -568,9 +631,7 @@ impl App {
             .filter(|s| !s.incomplete && s.trials.iter().any(|t| t.start.is_some()))
             .take(AIM_SESSIONS)
             .collect();
-        self.aim = Some(aim::analyze(recent.iter().flat_map(|s| s.trials.iter()), recent.len()));
-        self.aim_back = self.screen;
-        self.screen = Screen::Aim;
+        aim::analyze(recent.iter().flat_map(|s| s.trials.iter()), recent.len())
     }
 
     fn leave_session(&mut self, now: Instant) {
@@ -765,6 +826,37 @@ impl App {
                 }
                 _ => return,
             },
+            Screen::Summary if self.plan.is_some() => match code {
+                KeyCode::Enter | KeyCode::Char(' ') => match self.next_block() {
+                    Some(i) => self.start_block(i, at),
+                    None => {
+                        self.session = None;
+                        self.screen = Screen::PlanDone;
+                    }
+                },
+                KeyCode::Char('a') => self.open_aim(),
+                KeyCode::Esc => {
+                    self.session = None;
+                    self.plan = None;
+                    self.screen = Screen::Menu;
+                }
+                _ => return,
+            },
+            Screen::Plan => match code {
+                KeyCode::Enter | KeyCode::Char(' ') => self.start_block(0, at),
+                KeyCode::Esc => {
+                    self.plan = None;
+                    self.screen = Screen::Menu;
+                }
+                _ => return,
+            },
+            Screen::PlanDone => match code {
+                KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => {
+                    self.plan = None;
+                    self.screen = Screen::Menu;
+                }
+                _ => return,
+            },
             Screen::Summary => match code {
                 KeyCode::Enter | KeyCode::Char(' ') => self.start_session(self.last_baseline, at),
                 KeyCode::Char('p') => {
@@ -814,6 +906,7 @@ impl App {
             MenuItem::Baseline => self.start_session(true, now),
             MenuItem::Progress => self.open_progress(),
             MenuItem::Aim => self.open_aim(),
+            MenuItem::Plan => self.open_plan(),
             MenuItem::Quit => self.quit = true,
             MenuItem::Difficulty => {}
         }
@@ -1024,6 +1117,34 @@ mod tests {
         assert_eq!(a.progress_list().len(), 1);
         a.cycle_progress_filter();
         assert_eq!(a.progress_filter, None);
+    }
+
+    #[test]
+    fn plan_runs_blocks_in_order_and_collects_results() {
+        let mut a = App::with_history(Config::default(), Rect::new(0, 0, 80, 24), std::env::temp_dir().join("rt-plan-no-existe.jsonl"));
+        a.history_path = std::env::temp_dir().join(format!("rt-plan-{}.jsonl", std::process::id()));
+        a.open_plan();
+        assert_eq!(a.screen, Screen::Plan);
+        let n = a.plan.as_ref().unwrap().blocks.len();
+        assert_eq!(n, crate::plan::BLOCKS);
+        let t0 = Instant::now();
+        for i in 0..n {
+            if i == 0 {
+                a.on_key(KeyCode::Enter, t0);
+            }
+            let s = a.session.as_ref().unwrap();
+            assert!(s.cfg.plan_block);
+            assert_eq!(s.cfg.mode, a.plan.as_ref().unwrap().blocks[i].kind());
+            a.finish(true, t0);
+            assert_eq!(a.screen, Screen::Summary);
+            assert_eq!(a.plan.as_ref().unwrap().results.len(), i + 1);
+            a.on_key(KeyCode::Enter, t0);
+        }
+        assert_eq!(a.screen, Screen::PlanDone);
+        a.on_key(KeyCode::Enter, t0);
+        assert_eq!(a.screen, Screen::Menu);
+        assert!(a.plan.is_none());
+        let _ = std::fs::remove_file(&a.history_path);
     }
 
     #[test]

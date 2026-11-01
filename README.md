@@ -131,6 +131,27 @@ o con `"background": "none"` y `"effects": false`, vuelve el estilo sobrio origi
   (hueco): responder ahí es una comisión. Plazo para responder: 1 s en Reacción; en
   Go/No-Go depende de la dificultad (ver abajo).
 
+### Plan de entrenamiento
+
+"plan de hoy" en el menú (o `rt --plan`) arma una rutina de **3 bloques cortos** (unos 3
+minutos) según tus puntos débiles, y explica por qué eligió cada uno:
+
+- Cada modo recibe una prioridad. Sube si tu última sesión muestra una debilidad clara:
+  precisión menor al 80% en decisión, comisiones mayores al 20% en go/no-go, menos del
+  60% del tiempo encima en seguimiento, menos del 85% de acierto en blancos, o una
+  dirección con menos del 90% de acierto en el análisis de puntería. También sube si
+  nunca jugaste el modo o si hace una semana que no.
+- Se toman los 3 de mayor prioridad. Si fallas más hacia alguna dirección, el bloque de
+  **flick hace salir los blancos el doble de veces hacia esa dirección** (las 2 más débiles).
+- Los bloques son cortos (decisión 15 intentos, flick 20, go/no-go 20, reacción 15,
+  blancos y seguimiento 20 s) y usan tu dificultad. Solo el primero calienta completo.
+- Al terminar cada bloque ves su resumen; `Enter` pasa al siguiente y `Esc` deja el plan.
+  Al final, una lista con la métrica principal de cada bloque.
+
+Cada bloque se guarda como una sesión normal marcada como del plan, así que aparece en el
+progreso; para la comparación con la sesión anterior solo se usa otro bloque del plan,
+porque son más cortos.
+
 ### Puntería por dirección
 
 `a` en el resumen o "puntería" en el menú analiza las últimas 30 sesiones con mouse

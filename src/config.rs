@@ -180,6 +180,10 @@ pub struct Config {
     /// Intentos de calentamiento al empezar cada sesión: no cuentan para las estadísticas
     /// ni para terminar. En los modos por tiempo el reloj arranca al acabar.
     pub warmup_trials: usize,
+    /// Sesión que es un bloque del plan de entrenamiento (más corta que una normal).
+    pub plan_block: bool,
+    /// Flick: direcciones (0 = derecha, antihorario de 45 en 45) que salen el doble.
+    pub flick_focus: Vec<usize>,
 }
 
 impl Default for Config {
@@ -229,6 +233,8 @@ impl Default for Config {
             gonogo_level: 3,
             ambient_motion: true,
             warmup_trials: 3,
+            plan_block: false,
+            flick_focus: Vec::new(),
         }
     }
 }
@@ -297,6 +303,7 @@ impl Config {
         self.go_timeout_ms = self.go_timeout_ms.clamp(300, 10_000);
         self.gonogo_level = self.gonogo_level.min(9);
         self.warmup_trials = self.warmup_trials.min(20);
+        self.flick_focus.retain(|d| *d < 8);
     }
 
     /// Dificultad del modo elegido (Blancos tiene la suya).
@@ -467,6 +474,7 @@ pub struct Cli {
     pub command: Command,
     pub quick: bool,
     pub baseline: bool,
+    pub plan: bool,
 }
 
 pub const USAGE: &str = "\
@@ -475,6 +483,7 @@ rt - práctica de decisión y reflejos
 uso:
   rt [opciones]          abre el menú
   rt --quick             empieza una sesión de inmediato
+  rt --plan             plan de entrenamiento según tus puntos débiles
   rt --baseline          prueba base de decisión (30 intentos)
   rt --mode blancos      modo Blancos: varios verdes, 30 s, solo mouse
   rt export [-o ARCHIVO] exporta los intentos a CSV (stdout por defecto)
@@ -534,6 +543,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, cfg: &mut Config) -> 
             }
             "--quick" | "-q" => cli.quick = true,
             "--baseline" => cli.baseline = true,
+            "--plan" => cli.plan = true,
             "--mode" | "-m" => cfg.mode = parse_mode(it.next().as_deref())?,
             "--theme" => {
                 cfg.theme = match it.next().as_deref() {

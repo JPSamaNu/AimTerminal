@@ -105,7 +105,7 @@ impl GameKind {
 
     /// Modos con dificultad (fija o adaptativa).
     pub fn adaptive(self) -> bool {
-        matches!(self, GameKind::Decision | GameKind::Targets | GameKind::Flick | GameKind::Tracking)
+        !matches!(self, GameKind::Reaction)
     }
 }
 
@@ -170,7 +170,11 @@ pub struct Config {
     pub gonogo_trials: usize,
     /// Proporción de intentos "no-go" (no responder).
     pub nogo_ratio: f64,
+    /// Reacción pura: tiempo para responder.
     pub go_timeout_ms: u64,
+    /// Go/No-Go: el nivel (0 a 9) acorta la ventana para responder.
+    pub gonogo_difficulty: Difficulty,
+    pub gonogo_level: usize,
     /// El texto de fondo del estilo de código también avanza mientras juegas.
     pub ambient_motion: bool,
     /// Intentos de calentamiento al empezar cada sesión: no cuentan para las estadísticas
@@ -221,6 +225,8 @@ impl Default for Config {
             gonogo_trials: 30,
             nogo_ratio: 0.25,
             go_timeout_ms: 1000,
+            gonogo_difficulty: Difficulty::Adaptive,
+            gonogo_level: 3,
             ambient_motion: true,
             warmup_trials: 3,
         }
@@ -289,6 +295,7 @@ impl Config {
         self.gonogo_trials = self.gonogo_trials.clamp(1, 500);
         self.nogo_ratio = self.nogo_ratio.clamp(0.0, 0.6);
         self.go_timeout_ms = self.go_timeout_ms.clamp(300, 10_000);
+        self.gonogo_level = self.gonogo_level.min(9);
         self.warmup_trials = self.warmup_trials.min(20);
     }
 
@@ -304,6 +311,7 @@ impl Config {
             GameKind::Targets => Some((self.targets_difficulty, self.targets_level)),
             GameKind::Flick => Some((self.flick_difficulty, self.flick_level)),
             GameKind::Tracking => Some((self.tracking_difficulty, self.tracking_level)),
+            GameKind::GoNoGo => Some((self.gonogo_difficulty, self.gonogo_level)),
             _ => None,
         }
     }
@@ -313,6 +321,7 @@ impl Config {
             GameKind::Targets => Some((&mut self.targets_difficulty, &mut self.targets_level)),
             GameKind::Flick => Some((&mut self.flick_difficulty, &mut self.flick_level)),
             GameKind::Tracking => Some((&mut self.tracking_difficulty, &mut self.tracking_level)),
+            GameKind::GoNoGo => Some((&mut self.gonogo_difficulty, &mut self.gonogo_level)),
             _ => None,
         }
     }

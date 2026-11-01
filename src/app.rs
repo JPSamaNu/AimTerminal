@@ -164,6 +164,20 @@ impl Session {
                 level: self.level(),
             };
         }
+        if matches!(self.cfg.mode, GameKind::Reaction | GameKind::GoNoGo) {
+            let timeout = match self.cfg.mode {
+                GameKind::GoNoGo => difficulty::gonogo_window(self.level().unwrap_or(3)),
+                _ => Duration::from_millis(self.cfg.go_timeout_ms),
+            };
+            return Params {
+                box_w: self.cfg.box_w,
+                box_h: self.cfg.box_h,
+                min_boxes: 1,
+                max_boxes: 1,
+                timeout,
+                level: self.level(),
+            };
+        }
         if self.cfg.mode == GameKind::Tracking {
             let tl = difficulty::tracking_level(self.level().unwrap_or(3));
             return Params {

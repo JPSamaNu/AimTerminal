@@ -35,6 +35,7 @@ pub struct Single {
     rect: Rect,
     nogo: bool,
     flashes: Vec<Flash>,
+    level: Option<usize>,
 }
 
 impl Single {
@@ -57,13 +58,14 @@ impl Single {
             rect: Rect::default(),
             nogo: false,
             flashes: Vec::new(),
+            level: None,
         }
     }
 
     fn record(&mut self, outcome: Outcome, rt: Option<Duration>, method: Method) -> Step {
         let rec = TrialRecord {
             index: self.completed,
-            level: None,
+            level: self.level,
             n_boxes: 1,
             target_present: !self.nogo,
             target_w: self.rect.width,
@@ -100,7 +102,10 @@ impl GameMode for Single {
         if self.gonogo { "gonogo" } else { "reaction" }
     }
 
-    fn start_trial(&mut self, area: Rect, _params: &Params, now: Instant, _cursor: Option<(f32, f32)>) {
+    fn start_trial(&mut self, area: Rect, params: &Params, now: Instant, _cursor: Option<(f32, f32)>) {
+        // En Go/No-Go adaptativo la ventana cambia con el nivel en cada intento.
+        self.timeout = params.timeout;
+        self.level = params.level;
         let (w, h) = (self.size.0.min(area.width), self.size.1.min(area.height));
         self.rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
         self.nogo = self.nogo_schedule.get(self.completed).copied().unwrap_or(false);

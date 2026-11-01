@@ -128,7 +128,8 @@ o con `"background": "none"` y `"effects": false`, vuelve el estilo sobrio origi
   Es el único modo que redibuja seguido (unas 30 veces por segundo) mientras juegas.
 - **Reacción pura** y **Go/No-Go**: un recuadro en el centro tras 0.8–2.5 s. Se responde
   con espacio, un número o un clic. En Go/No-Go, el 25% de los intentos son no-go
-  (hueco): responder ahí es una comisión. Plazo para responder: 1 s.
+  (hueco): responder ahí es una comisión. Plazo para responder: 1 s en Reacción; en
+  Go/No-Go depende de la dificultad (ver abajo).
 
 ### Puntería por dirección
 
@@ -201,6 +202,22 @@ El nivel sube la velocidad, achica el blanco y hace que cambie de rumbo más seg
 En adaptativa, cada segundo cuenta: con el cursor encima al menos el 80% del segundo es
 un éxito (3 seguidos suben un nivel), menos del 50% es un fallo (baja uno) y lo de en
 medio solo corta la racha. El nivel cambia en vivo, sin reiniciar el recuadro.
+
+### Dificultad de Go/No-Go
+
+Con niveles como los demás. El nivel acorta la **ventana para responder** a un "go":
+
+| dificultad | ventana |
+|---|---|
+| fácil | 1.1 s |
+| normal | 900 ms |
+| difícil | 620 ms |
+| experto | 420 ms |
+
+En adaptativa usa la escalera de Decisión: 3 "go" acertados seguidos suben un nivel; una
+comisión (responder a un no-go), una omisión o una anticipación bajan uno; no responder
+a un no-go no mueve nada. Así la ventana se ajusta al punto donde todavía frenas a tiempo.
+Reacción pura sigue con `go_timeout_ms` (1 s).
 
 ### Dificultad de Flick
 
@@ -351,6 +368,8 @@ Todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de Windows):
   "gonogo_trials": 30,
   "nogo_ratio": 0.25,
   "go_timeout_ms": 1000,
+  "gonogo_difficulty": "adaptive",
+  "gonogo_level": 3,
   "ambient_motion": true,
   "warmup_trials": 3
 }

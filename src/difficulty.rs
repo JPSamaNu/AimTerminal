@@ -89,6 +89,13 @@ pub fn speed_signal(outcome: Outcome, rt_ms: Option<f64>, fast_ms: u64) -> Optio
     }
 }
 
+/// Go/No-Go por nivel: ventana para responder a un "go", en ms.
+const GONOGO: [u64; 10] = [1200, 1100, 1000, 900, 800, 700, 620, 550, 480, 420];
+
+pub fn gonogo_window(level: usize) -> Duration {
+    Duration::from_millis(GONOGO[level.min(MAX_LEVEL)])
+}
+
 /// Seguimiento por nivel: velocidad (celdas por segundo), ancho, alto y cada cuánto
 /// cambia de rumbo (mín. y máx. en ms).
 const TRACKING: [(f32, u16, u16, u64, u64); 10] = [
@@ -249,6 +256,23 @@ mod tests {
         assert_eq!(speed_signal(Outcome::Hit, Some(1500.0), 900), Some(false));
         assert_eq!(speed_signal(Outcome::Miss, Some(300.0), 900), Some(false));
         assert_eq!(speed_signal(Outcome::Omission, None, 900), Some(false));
+    }
+
+    #[test]
+    fn gonogo_window_shrinks() {
+        assert_eq!(gonogo_window(3), Duration::from_millis(900));
+        for l in 1..=MAX_LEVEL {
+            assert!(gonogo_window(l) < gonogo_window(l - 1));
+        }
+        // Go/No-Go usa la escalera de Decisión: acertar un go suma, una comisión baja.
+        let mut s = Staircase::new(3);
+        s.update(Hit);
+        s.update(CorrectRejection);
+        s.update(Hit);
+        s.update(Hit);
+        assert_eq!(s.level, 4);
+        s.update(FalseAlarm);
+        assert_eq!(s.level, 3);
     }
 
     #[test]

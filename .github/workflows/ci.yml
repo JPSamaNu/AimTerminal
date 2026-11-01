@@ -1,0 +1,51 @@
+# Compila, prueba y revisa con clippy en cada push y pull request, en Windows y Linux.
+# El ejecutable de Windows queda como artefacto descargable de cada ejecución.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Pruebas
+        run: cargo test --locked
+
+      - name: Compilar release
+        run: cargo build --release --locked
+
+      - name: Subir ejecutable (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rt-windows
+          path: target/release/rt.exe
+
+      - name: Subir ejecutable (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rt-linux
+          path: target/release/rt

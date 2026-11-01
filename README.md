@@ -12,6 +12,12 @@ de DLLs de Windows, así que en otra computadora basta con copiarlo a una carpet
 `cargo build`, ~700 MB) queda fuera de git: para desarrollar, `cargo build` lo
 reconstruye.
 
+## CI
+
+`.github/workflows/ci.yml` corre en cada push, en Windows y Linux: clippy sin warnings,
+pruebas y compilación release. El ejecutable queda como artefacto (`rt-windows`,
+`rt-linux`) en la pestaña Actions de GitHub.
+
 ## Compilar
 
 Requiere Rust estable. Con el toolchain GNU (`stable-x86_64-pc-windows-gnu`) o MSVC:

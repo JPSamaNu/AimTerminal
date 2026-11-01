@@ -2,7 +2,7 @@
 //! objetivo. En una parte de los intentos solo hay distractores y lo correcto es no responder.
 
 use super::layout::{center, cell_distance, contains, inner, layout};
-use super::{GameMode, Method, Outcome, Params, Response, Step, TrialRecord};
+use super::{Flash, FlashKind, GameMode, pt, Method, Outcome, Params, Response, Step, TrialRecord};
 use crate::config::{Config, Fill};
 use crate::render;
 use crate::theme::Theme;
@@ -33,11 +33,15 @@ pub struct Decision {
     boxes: Vec<Rect>,
     target: Option<usize>,
     cursor_dist: Option<f32>,
+    start: Option<(f32, f32)>,
+    click: Option<(f32, f32)>,
+    flashes: Vec<Flash>,
 }
 
 impl Decision {
     pub fn new(cfg: &Config, mut rng: fastrand::Rng) -> Decision {
-        let catch_schedule = catch_schedule(cfg.trials, cfg.catch_ratio, &mut rng);
+        let mut catch_schedule = vec![false; cfg.warmup_trials];
+        catch_schedule.extend(self::catch_schedule(cfg.trials, cfg.catch_ratio, &mut rng));
         Decision {
             rng,
             anticipation: Duration::from_millis(cfg.anticipation_ms),
@@ -58,6 +62,15 @@ impl Decision {
             boxes: Vec::new(),
             target: None,
             cursor_dist: None,
+            start: None,
+            click: None,
+            flashes: Vec::new(),
+        }
+    }
+
+    fn flash(&mut self, kind: FlashKind, i: usize) {
+        if let Some(&rect) = self.boxes.get(i) {
+            self.flashes.push(Flash { kind, rect });
         }
     }
 
@@ -75,6 +88,12 @@ impl Decision {
             outcome,
             method,
             anticipation: outcome == Outcome::Anticipation,
+            start: self.start.map(pt),
+            target_pos: self.target.and_then(|t| self.boxes.get(t)).map(|b| pt(center(b))),
+            click: self.click.map(pt),
+            score: None,
+            radius: None,
+            warmup: false,
         };
         self.completed += 1;
         self.phase = Phase::Idle;
@@ -108,7 +127,7 @@ impl GameMode for Decision {
         "decision"
     }
 
-    fn start_trial(&mut self, area: Rect, params: &Params, now: Instant) {
+    fn start_trial(&mut self, area: Rect, params: &Params, now: Instant, _cursor: Option<(f32, f32)>) {
         self.params = *params;
         let lo = params.min_boxes.min(params.max_boxes);
         let n = self.rng.usize(lo..=params.max_boxes);
@@ -116,6 +135,8 @@ impl GameMode for Decision {
         let is_catch = self.catch_schedule.get(self.completed).copied().unwrap_or(false);
         self.target = if is_catch || self.boxes.is_empty() { None } else { Some(self.rng.usize(..self.boxes.len())) };
         self.cursor_dist = None;
+        self.start = None;
+        self.click = None;
         let wait = self.rng.u64(self.fixation.0..=self.fixation.1);
         self.phase = Phase::Fixation { until: now + Duration::from_millis(wait) };
     }
@@ -135,7 +156,13 @@ impl GameMode for Decision {
                 Step::Redraw
             }
             Phase::Stimulus { deadline, .. } if now >= deadline => {
-                let outcome = if self.target.is_some() { Outcome::Omission } else { Outcome::CorrectRejection };
+                let outcome = match self.target {
+                    Some(t) => {
+                        self.flash(FlashKind::Reveal, t);
+                        Outcome::Omission
+                    }
+                    None => Outcome::CorrectRejection,
+                };
                 self.record(outcome, None, Method::None)
             }
             _ => Step::Idle,
@@ -147,6 +174,7 @@ impl GameMode for Decision {
             return;
         }
         self.phase = Phase::Stimulus { onset: now, deadline: now + self.params.timeout };
+        self.start = cursor;
         self.cursor_dist = match (cursor, self.target) {
             (Some((cx, cy)), Some(t)) => {
                 Some(cell_distance((cx, cy), center(&self.boxes[t])))
@@ -156,9 +184,16 @@ impl GameMode for Decision {
     }
 
     fn respond(&mut self, r: Response, at: Instant) -> Step {
+        if r == Response::Press {
+            // El espacio no elige ningún recuadro.
+            return Step::Idle;
+        }
         let method = match r {
-            Response::Key(_) => Method::Keyboard,
-            Response::Click { .. } => Method::Mouse,
+            Response::Key(_) | Response::Press => Method::Keyboard,
+            Response::Click { x, y } => {
+                self.click = Some((x, y));
+                Method::Mouse
+            }
         };
         match self.phase {
             Phase::Fixation { .. } | Phase::Pending => self.record(Outcome::Anticipation, None, method),
@@ -173,6 +208,16 @@ impl GameMode for Decision {
                 };
                 let rt = at.saturating_duration_since(onset);
                 let outcome = classify(self.target, chosen, rt, self.anticipation);
+                match (outcome, self.target) {
+                    (Outcome::Hit, _) => self.flash(FlashKind::Hit, chosen),
+                    (_, Some(t)) => {
+                        self.flash(FlashKind::Wrong, chosen);
+                        if t != chosen {
+                            self.flash(FlashKind::Reveal, t);
+                        }
+                    }
+                    (_, None) => self.flash(FlashKind::Wrong, chosen),
+                }
                 self.record(outcome, Some(rt), method)
             }
             Phase::Idle => Step::Idle,
@@ -187,6 +232,10 @@ impl GameMode for Decision {
         self.phase != Phase::Idle
     }
 
+    fn take_flashes(&mut self) -> Vec<Flash> {
+        std::mem::take(&mut self.flashes)
+    }
+
     fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme) {
         match self.phase {
             Phase::Fixation { .. } => render::fixation(buf, area, theme),
@@ -194,9 +243,9 @@ impl GameMode for Decision {
                 for (i, b) in self.boxes.iter().enumerate() {
                     let label = char::from_digit((i + 1) as u32, 10).unwrap_or(' ');
                     if Some(i) == self.target {
-                        render::draw_box(buf, *b, self.target_fill, theme.target, Some(label));
+                        render::draw_box_themed(buf, *b, self.target_fill, theme.target, Some(label), theme);
                     } else {
-                        render::draw_box(buf, *b, self.distractor_fill, theme.distractor, Some(label));
+                        render::draw_box_themed(buf, *b, self.distractor_fill, theme.distractor, Some(label), theme);
                     }
                 }
             }
@@ -218,6 +267,15 @@ mod tests {
         let mut rng = fastrand::Rng::with_seed(3);
         assert_eq!(catch_schedule(20, 0.17, &mut rng).iter().filter(|c| **c).count(), 3);
         assert_eq!(catch_schedule(30, 0.17, &mut rng).iter().filter(|c| **c).count(), 5);
+    }
+
+    #[test]
+    fn warmup_trials_come_first_and_always_have_target() {
+        let cfg = Config { trials: 20, warmup_trials: 3, ..Config::default() };
+        let m = Decision::new(&cfg, fastrand::Rng::with_seed(5));
+        assert_eq!(m.catch_schedule.len(), 23);
+        assert!(m.catch_schedule[..3].iter().all(|c| !c));
+        assert_eq!(m.catch_schedule.iter().filter(|c| **c).count(), 3);
     }
 
     #[test]
@@ -243,7 +301,7 @@ mod tests {
     fn full_trial_hit_and_rt() {
         let mut m = mode();
         let t0 = Instant::now();
-        m.start_trial(area(80, 24), &params(), t0);
+        m.start_trial(area(80, 24), &params(), t0, None);
         let until = m.deadline().unwrap();
         assert_eq!(m.tick(until), Step::Redraw);
         m.drawn(until, Some((0.5, 0.5)));
@@ -252,6 +310,8 @@ mod tests {
             panic!("sin resultado")
         };
         assert_eq!(rec.outcome, Outcome::Hit);
+        assert_eq!(m.take_flashes(), vec![Flash { kind: FlashKind::Hit, rect: m.boxes[target] }]);
+        assert!(m.take_flashes().is_empty());
         assert!((rec.rt_ms.unwrap() - 350.0).abs() < 0.01);
         assert_eq!(rec.method, Method::Keyboard);
         assert_eq!(rec.level, Some(2));
@@ -263,7 +323,7 @@ mod tests {
     fn response_during_fixation_is_anticipation() {
         let mut m = mode();
         let t0 = Instant::now();
-        m.start_trial(area(80, 24), &params(), t0);
+        m.start_trial(area(80, 24), &params(), t0, None);
         let Step::Done(rec) = m.respond(Response::Key(1), t0) else { panic!() };
         assert_eq!(rec.outcome, Outcome::Anticipation);
         assert!(rec.anticipation);
@@ -273,7 +333,7 @@ mod tests {
     fn timeout_is_omission_and_click_outside_is_ignored() {
         let mut m = mode();
         let t0 = Instant::now();
-        m.start_trial(area(80, 24), &params(), t0);
+        m.start_trial(area(80, 24), &params(), t0, None);
         let until = m.deadline().unwrap();
         m.tick(until);
         m.drawn(until, None);
@@ -282,14 +342,15 @@ mod tests {
         let Step::Done(rec) = m.tick(m.deadline().unwrap()) else { panic!() };
         assert_eq!(rec.outcome, Outcome::Omission);
         assert_eq!(rec.rt_ms, None);
+        assert_eq!(m.take_flashes()[0].kind, FlashKind::Reveal);
     }
 
     #[test]
     fn catch_trial_outcomes() {
-        let cfg = Config { catch_ratio: 1.0, trials: 2, ..Config::default() };
+        let cfg = Config { catch_ratio: 1.0, trials: 2, warmup_trials: 0, ..Config::default() };
         let mut m = Decision::new(&cfg, fastrand::Rng::with_seed(4));
         let t0 = Instant::now();
-        m.start_trial(area(80, 24), &params(), t0);
+        m.start_trial(area(80, 24), &params(), t0, None);
         assert_eq!(m.target, None);
         let until = m.deadline().unwrap();
         m.tick(until);
@@ -303,7 +364,7 @@ mod tests {
         assert_eq!(rec.outcome, Outcome::FalseAlarm);
         assert_eq!(rec.method, Method::Mouse);
 
-        m.start_trial(area(80, 24), &params(), t0);
+        m.start_trial(area(80, 24), &params(), t0, None);
         let until = m.deadline().unwrap();
         m.tick(until);
         m.drawn(until, None);

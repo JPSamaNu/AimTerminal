@@ -1,3 +1,5 @@
+mod aim;
+mod ambient;
 mod app;
 mod config;
 mod difficulty;
@@ -5,6 +7,8 @@ mod history;
 mod input;
 mod modes;
 mod render;
+mod report;
+mod render_code;
 mod stats;
 mod term;
 mod theme;

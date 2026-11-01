@@ -1,17 +1,20 @@
 //! Dibujo de las pantallas y de los elementos del juego.
 
-use crate::app::{self, App, MENU, MenuItem, PROGRESS_VIEWS, PauseReason, Screen, Session};
-use crate::config::{Difficulty, Fill, GameKind};
+use crate::aim;
+use crate::app::{self, App, EFFECT, MENU, MenuItem, PROGRESS_VIEWS, PauseReason, Screen, Session};
+use crate::report::{self, Metric};
+use crate::config::{Fill, GameKind};
 use crate::history::SessionRecord;
-use crate::modes::Outcome;
-use crate::stats::{self, Stats};
+use crate::modes::{FlashKind, Outcome};
+use crate::stats;
 use crate::theme::Theme;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use std::time::Instant;
 
 pub const MIN_W: u16 = 40;
 pub const MIN_H: u16 = 12;
@@ -21,14 +24,19 @@ pub fn play_area(area: Rect) -> Rect {
     Rect { height: area.height.saturating_sub(1), ..area }
 }
 
-fn status_area(area: Rect) -> Rect {
+pub(crate) fn status_area(area: Rect) -> Rect {
     Rect { y: area.y + area.height.saturating_sub(1), height: 1.min(area.height), ..area }
 }
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
+    paint_background(f.buffer_mut(), area, &app.theme);
     if area.width < MIN_W || area.height < MIN_H {
         too_small(f, app, area);
+        return;
+    }
+    if app.theme.code {
+        crate::render_code::draw(f, app, area);
         return;
     }
     match app.screen {
@@ -38,11 +46,13 @@ pub fn draw(f: &mut Frame, app: &App) {
             if let Some(s) = &app.session {
                 s.mode.render(f.buffer_mut(), play_area(area), &app.theme);
             }
+            draw_effects(f.buffer_mut(), play_area(area), app, Instant::now());
             status(f, app, area);
         }
         Screen::Paused(reason) => paused(f, app, area, reason),
         Screen::Summary => summary(f, app, area),
         Screen::Progress => progress(f, app, area),
+        Screen::Aim => aim_screen(f, app, area),
     }
 }
 
@@ -64,10 +74,10 @@ pub fn centered(f: &mut Frame, area: Rect, lines: Vec<Line>) {
 
 /// Línea con prioridad: 0 siempre se muestra; las de número mayor se quitan primero
 /// cuando no hay espacio.
-type PLine = (Line<'static>, u8);
+pub(crate) type PLine = (Line<'static>, u8);
 
 /// Deja como mucho `height` líneas quitando primero las de mayor prioridad.
-fn fit(mut lines: Vec<PLine>, height: usize) -> Vec<Line<'static>> {
+pub(crate) fn fit(mut lines: Vec<PLine>, height: usize) -> Vec<Line<'static>> {
     while lines.len() > height {
         let worst = lines.iter().map(|(_, p)| *p).max().unwrap_or(0);
         if worst == 0 {
@@ -83,27 +93,29 @@ fn fit(mut lines: Vec<PLine>, height: usize) -> Vec<Line<'static>> {
 /// Panel centrado con marco fino, título arriba y ayuda abajo. Si no cabe con marco,
 /// se dibuja sin él y las líneas opcionales se quitan.
 fn panel(f: &mut Frame, area: Rect, t: &Theme, title: &str, footer: &str, body: Vec<PLine>) {
-    let body_w = body.iter().map(|(l, _)| l.width()).max().unwrap_or(0);
-    let w = body_w.max(title.chars().count() + 4).max(footer.chars().count() + 4) as u16;
-    let framed_w = w + 6;
-    let framed_h = body.len() as u16 + 4;
-    if framed_w <= area.width && framed_h <= area.height {
-        let r = Rect {
-            x: area.x + (area.width - framed_w) / 2,
-            y: area.y + (area.height - framed_h) / 2,
-            width: framed_w,
-            height: framed_h,
-        };
-        let block = Block::bordered()
-            .border_style(t.dim())
-            .title(Line::styled(format!(" {title} "), t.accent()))
-            .title_bottom(Line::styled(format!(" {footer} "), t.dim()));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        let content = Rect { x: inner.x + 2, y: inner.y + 1, width: inner.width.saturating_sub(4), height: inner.height - 1 };
-        let lines: Vec<Line> = body.into_iter().map(|(l, _)| l).collect();
-        f.render_widget(Paragraph::new(lines), content);
-        return;
+    let avail = area.height.saturating_sub(4) as usize;
+    let required = body.iter().filter(|(_, p)| *p == 0).count();
+    if required <= avail {
+        let lines = fit(body.clone(), avail);
+        let body_w = lines.iter().map(|l| l.width()).max().unwrap_or(0);
+        let w = body_w.max(title.chars().count() + 4).max(footer.chars().count() + 4) as u16;
+        let (framed_w, framed_h) = (w + 6, lines.len() as u16 + 4);
+        if framed_w <= area.width {
+            let r = Rect {
+                x: area.x + (area.width - framed_w) / 2,
+                y: area.y + (area.height - framed_h) / 2,
+                width: framed_w,
+                height: framed_h,
+            };
+            let block = frame_block(t, title, footer);
+            let inner = block.inner(r);
+            f.render_widget(Clear, r);
+            f.render_widget(block, r);
+            let content =
+                Rect { x: inner.x + 2, y: inner.y + 1, width: inner.width.saturating_sub(4), height: inner.height - 1 };
+            f.render_widget(Paragraph::new(lines), content);
+            return;
+        }
     }
     let mut lines: Vec<PLine> = vec![(Line::styled(title.to_string(), t.accent()), 0), (Line::raw(""), 3)];
     lines.extend(body);
@@ -116,81 +128,259 @@ fn panel(f: &mut Frame, area: Rect, t: &Theme, title: &str, footer: &str, body: 
     f.render_widget(Paragraph::new(lines), r);
 }
 
+/// Marco redondeado con fondo de panel, título arriba y ayuda abajo.
+fn frame_block<'a>(t: &Theme, title: &str, footer: &str) -> Block<'a> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .style(Style::default().bg(t.panel_bg()))
+        .border_style(t.dim())
+        .title(Line::styled(format!(" {title} "), t.accent()))
+        .title_bottom(Line::styled(format!(" {footer} "), t.dim()))
+}
+
+/// Degradado vertical oscuro con una rejilla de puntos muy tenue.
+fn paint_background(buf: &mut Buffer, area: Rect, t: &Theme) {
+    let Some(s) = &t.surface else { return };
+    for y in area.top()..area.bottom() {
+        let bg = s.bg_at(y - area.y, area.height);
+        for x in area.left()..area.right() {
+            let cell = &mut buf[(x, y)];
+            cell.set_bg(bg);
+            if let Some(g) = s.grid
+                && (x - area.x) % 6 == 3
+                && (y - area.y) % 3 == 1
+            {
+                cell.set_char('·').set_fg(g);
+            }
+        }
+    }
+}
+
+/// Oscurece un color RGB (k = 1 lo deja igual).
+pub(crate) fn fade(c: Color, k: f32) -> Color {
+    let k = k.clamp(0.0, 1.0);
+    match c {
+        Color::Rgb(r, g, b) => Color::Rgb((r as f32 * k) as u8, (g as f32 * k) as u8, (b as f32 * k) as u8),
+        other => other,
+    }
+}
+
+fn put(buf: &mut Buffer, area: Rect, x: f32, y: f32, ch: char, color: Color) {
+    if x < area.x as f32 || y < area.y as f32 {
+        return;
+    }
+    let (x, y) = (x as u16, y as u16);
+    if x < area.right() && y < area.bottom() {
+        buf[(x, y)].set_char(ch).set_fg(color);
+    }
+}
+
+const RAYS: [(f32, f32); 8] =
+    [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (0.7, 0.7), (-0.7, 0.7), (0.7, -0.7), (-0.7, -0.7)];
+
+/// Efectos breves: acierto (anillo y destello de puntos), error (sombreado),
+/// objetivo no elegido (contorno tenue) y clic en el vacío (aspa).
+pub(crate) fn draw_effects(buf: &mut Buffer, area: Rect, app: &App, now: Instant) {
+    let t = &app.theme;
+    let code = t.code;
+    for (fl, start) in &app.effects {
+        let p = now.saturating_duration_since(*start).as_secs_f32() / EFFECT.as_secs_f32();
+        if p >= 1.0 {
+            continue;
+        }
+        let r = fl.rect;
+        let (cx, cy) = (r.x as f32 + r.width as f32 / 2.0, r.y as f32 + r.height as f32 / 2.0);
+        match fl.kind {
+            FlashKind::Hit => {
+                let col = fade(t.target, 1.0 - 0.6 * p);
+                if p < 0.45 {
+                    draw_box_themed(buf, r, Fill::Hollow, col, None, t);
+                }
+                let (rx, ry) = (r.width as f32 / 2.0 + 1.0 + p * 5.0, r.height as f32 / 2.0 + 0.5 + p * 2.5);
+                let ch = match (code, p < 0.5) {
+                    (true, true) => '1',
+                    (true, false) => '0',
+                    (false, true) => '•',
+                    (false, false) => '·',
+                };
+                for (dx, dy) in RAYS {
+                    put(buf, area, cx + dx * rx, cy + dy * ry, ch, col);
+                }
+            }
+            FlashKind::Wrong => {
+                let ch = match (code, p < 0.5) {
+                    (true, true) => '#',
+                    (true, false) => ':',
+                    (false, true) => '▒',
+                    (false, false) => '░',
+                };
+                let col = fade(t.distractor, 1.0 - 0.5 * p);
+                for y in r.top()..r.bottom() {
+                    for x in r.left()..r.right() {
+                        put(buf, area, x as f32, y as f32, ch, col);
+                    }
+                }
+            }
+            FlashKind::Reveal => draw_box_themed(buf, r, Fill::Hollow, fade(t.target, 0.6 - 0.3 * p), None, t),
+            FlashKind::Miss => {
+                let col = fade(t.distractor, 1.0 - 0.6 * p);
+                let ch = match (code, p < 0.5) {
+                    (true, true) => 'x',
+                    (false, true) => '×',
+                    (true, false) => '.',
+                    (false, false) => '·',
+                };
+                put(buf, area, r.x as f32, r.y as f32, ch, col);
+                if p > 0.2 {
+                    let d = 1.0 + p * 2.0;
+                    for (dx, dy) in &RAYS[4..] {
+                        let dot = if code { '.' } else { '·' };
+                        put(buf, area, r.x as f32 + dx * d * 2.0, r.y as f32 + dy * d, dot, col);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Fuente de 3x5 puntos para cifras grandes, dibujada con medios bloques.
+fn glyph(c: char) -> [u8; 5] {
+    match c {
+        '0' => [7, 5, 5, 5, 7],
+        '1' => [2, 6, 2, 2, 7],
+        '2' => [7, 1, 7, 4, 7],
+        '3' => [7, 1, 7, 1, 7],
+        '4' => [5, 5, 7, 1, 1],
+        '5' => [7, 4, 7, 1, 7],
+        '6' => [7, 4, 7, 5, 7],
+        '7' => [7, 1, 1, 1, 1],
+        '8' => [7, 5, 7, 5, 7],
+        '9' => [7, 5, 7, 1, 7],
+        'R' => [6, 5, 6, 5, 5],
+        'T' => [7, 2, 2, 2, 2],
+        '-' => [0, 0, 7, 0, 0],
+        _ => [0; 5],
+    }
+}
+
+/// Texto en cifras grandes: 3 filas de alto, 4 columnas por carácter.
+pub fn big(text: &str) -> [String; 3] {
+    let mut rows: [String; 3] = Default::default();
+    for (i, c) in text.chars().enumerate() {
+        let g = glyph(c);
+        for (r, row) in rows.iter_mut().enumerate() {
+            if i > 0 {
+                row.push(' ');
+            }
+            let top = g[r * 2];
+            let bottom = if r * 2 + 1 < 5 { g[r * 2 + 1] } else { 0 };
+            for bit in [4u8, 2, 1] {
+                row.push(match (top & bit != 0, bottom & bit != 0) {
+                    (true, true) => '█',
+                    (true, false) => '▀',
+                    (false, true) => '▄',
+                    (false, false) => ' ',
+                });
+            }
+        }
+    }
+    rows
+}
+
 /// Etiqueta a la izquierda y valor alineado a la derecha en un ancho fijo.
-fn row(label: &str, value: &str, width: usize, ls: Style, vs: Style) -> Line<'static> {
+pub(crate) fn row(label: &str, value: &str, width: usize, ls: Style, vs: Style) -> Line<'static> {
     let gap = width.saturating_sub(label.chars().count() + value.chars().count()).max(1);
     Line::from(vec![Span::styled(label.to_string(), ls), Span::raw(" ".repeat(gap)), Span::styled(value.to_string(), vs)])
 }
 
 fn menu(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    const W: usize = 26;
+    const W: usize = 28;
     let mut body: Vec<PLine> = Vec::new();
+    // El logo solo si cabe entero.
+    if area.height >= 18 {
+        for l in big("RT") {
+            body.push((Line::styled(format!("  {l}"), Style::default().fg(t.target)), 0));
+        }
+        body.push((Line::raw(""), 3));
+    }
     for (i, item) in MENU.iter().enumerate() {
         let selected = i == app.menu_idx;
         let (label, value) = match item {
             MenuItem::Start => ("empezar", String::new()),
             MenuItem::Mode => ("modo", app.cfg.mode.label().to_string()),
-            MenuItem::Difficulty => (
-                "dificultad",
-                if app.cfg.mode == GameKind::Decision { app.cfg.difficulty.label().to_string() } else { "—".into() },
-            ),
+            MenuItem::Difficulty => ("dificultad", app.cfg.difficulty_label().unwrap_or_else(|| "—".into())),
             MenuItem::Baseline => ("baseline", String::new()),
             MenuItem::Progress => ("progreso", String::new()),
+            MenuItem::Aim => ("puntería", String::new()),
             MenuItem::Quit => ("salir", String::new()),
         };
         let (mark, ls) = if selected { ("› ", t.accent()) } else { ("  ", t.dim()) };
-        let value = if selected && !value.is_empty() && value != "—" { format!("‹ {value} ›") } else { value };
+        let value = if selected && !value.is_empty() && value != "—" { format!("‹ {value} › ") } else { format!("{value} ") };
         let mut line = row(&format!("{mark}{label}"), &value, W, ls, if selected { t.accent() } else { t.text() });
-        line.spans.insert(0, Span::raw(""));
+        if selected {
+            line = line.style(Style::default().bg(t.select_bg()));
+        }
         body.push((line, 0));
     }
-    let last = app::last_comparable(&app.history, app.cfg.mode, false, app.cfg.difficulty);
+    let last = app::last_comparable(&app.history, &app.cfg, false);
     if let Some(s) = last {
         body.push((Line::raw(""), 2));
-        body.push((row("  último puntaje", &ms(s.stats.ies_ms), W, t.dim(), t.text()), 1));
+        body.push((row("  último puntaje", &format!("{} ", ms(s.stats.ies_ms)), W, t.dim(), t.text()), 1));
     }
     panel(f, area, t, "rt", "↑↓ Enter · ←→ cambia · q", body);
 }
 
-fn mode_hint(kind: GameKind) -> &'static str {
-    match kind {
-        GameKind::Decision => "elige el relleno · clic o 1-9",
-        GameKind::Targets => "clic en los verdes · solo mouse",
-    }
+pub(crate) fn mode_hint(kind: GameKind) -> &'static str {
+    report::hint(kind)
 }
 
 fn countdown(f: &mut Frame, app: &App, area: Rect, left: u8) {
     let t = &app.theme;
-    let mut lines = vec![Line::styled(left.to_string(), t.accent()), Line::raw("")];
+    let mut lines: Vec<Line> = big(&left.to_string()).into_iter().map(|l| Line::styled(l, t.accent())).collect();
+    lines.push(Line::raw(""));
     if let Some(s) = &app.session {
-        lines.push(Line::styled(s.cfg.mode.label(), t.dim()));
+        lines.push(Line::styled(s.cfg.mode.label(), t.text()));
         lines.push(Line::styled(mode_hint(s.cfg.mode), t.dim()));
     }
-    centered(f, play_area(area), lines);
+    let lines: Vec<Line> = lines.into_iter().map(|l| l.centered()).collect();
+    let h = lines.len() as u16;
+    let a = play_area(area);
+    let r = Rect { y: a.y + a.height.saturating_sub(h) / 2, height: h.min(a.height), ..a };
+    f.render_widget(Paragraph::new(lines), r);
     status(f, app, area);
+}
+
+/// Texto de avance de la sesión: tiempo restante o intentos hechos.
+pub(crate) fn progress_text(s: &Session) -> String {
+    if let Some((done, total)) = s.warming_up() {
+        return format!("calentamiento {done}/{total} · no cuenta");
+    }
+    match (s.timer, s.cfg.mode) {
+        (Some(timer), GameKind::Tracking) => {
+            let st = stats::compute(&s.records);
+            format!("{:>2} s  encima {}", timer.shown_secs(std::time::Instant::now()), pct(st.on_target))
+        }
+        (Some(timer), _) => format!(
+            "{:>2} s  {} aciertos  {} fallos",
+            timer.shown_secs(std::time::Instant::now()),
+            s.count(Outcome::Hit),
+            s.count(Outcome::Miss) + s.count(Outcome::Anticipation)
+        ),
+        (None, _) => format!("{}/{}", s.counted, s.cfg.session_trials()),
+    }
 }
 
 fn status(f: &mut Frame, app: &App, area: Rect) {
     let Some(s) = &app.session else { return };
-    let mut text = match s.timer {
-        Some(timer) => {
-            let left = timer.shown_secs(std::time::Instant::now());
-            format!(
-                "{left:>2} s  {} aciertos  {} fallos",
-                s.count(Outcome::Hit),
-                s.count(Outcome::Miss) + s.count(Outcome::Anticipation)
-            )
-        }
-        None => format!("{}/{}", s.records.len(), s.cfg.trials),
-    };
+    let mut text = progress_text(s);
     if s.baseline {
         text.push_str("  base");
     }
-    if let Some(l) = s.stair.as_ref().map(|st| st.level) {
+    if let Some(l) = s.level() {
         text.push_str(&format!("  niv {l}"));
     }
-    if let Some(r) = &s.last {
+    if let (Some(r), false) = (&s.last, s.cfg.mode == GameKind::Tracking) {
         text.push_str("  · ");
         text.push_str(r.outcome.label());
         if let (Some(ms), false) = (r.rt_ms, r.anticipation) {
@@ -198,10 +388,12 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
         }
     }
     let a = status_area(area);
-    f.render_widget(Paragraph::new(Line::styled(text, app.theme.dim())), a);
+    f.render_widget(Clear, a);
+    f.render_widget(Block::default().style(Style::default().bg(app.theme.panel_bg())), a);
+    f.render_widget(Paragraph::new(Line::styled(format!(" {text}"), app.theme.dim())), a);
     let hint = "Esc pausa";
     if a.width as usize > hint.len() + 44 {
-        let r = Rect { x: a.x + a.width - hint.len() as u16, width: hint.len() as u16, ..a };
+        let r = Rect { x: a.x + a.width - hint.len() as u16 - 1, width: hint.len() as u16, ..a };
         f.render_widget(Paragraph::new(Line::styled(hint, app.theme.dim())), r);
     }
 }
@@ -224,33 +416,34 @@ fn paused(f: &mut Frame, app: &App, area: Rect, reason: PauseReason) {
     status(f, app, area);
 }
 
-fn ms(v: Option<f64>) -> String {
-    v.map(|x| format!("{x:.0} ms")).unwrap_or_else(|| "-".into())
+pub(crate) fn ms(v: Option<f64>) -> String {
+    report::ms(v)
 }
 
-fn pct(v: Option<f64>) -> String {
-    v.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into())
+pub(crate) fn pct(v: Option<f64>) -> String {
+    report::pct(v)
 }
 
 /// Diferencia frente a la sesión anterior, en verde si mejora y en rojo si empeora.
-fn delta(t: &Theme, now: Option<f64>, before: Option<f64>, lower_is_better: bool, scale: f64) -> Span<'static> {
-    let (Some(a), Some(b)) = (now, before) else { return Span::raw("") };
-    let d = (a - b) * scale;
-    if d.abs() < 0.5 {
+pub(crate) fn delta(t: &Theme, m: &Metric) -> Span<'static> {
+    let (Some(a), Some(b)) = (m.now, m.before) else { return Span::raw("") };
+    let d = (a - b) * m.scale;
+    let tiny = 0.5 / 10f64.powi(m.decimals as i32);
+    if d.abs() < tiny {
         return Span::styled("  =", t.dim());
     }
-    let better = (d < 0.0) == lower_is_better;
+    let better = (d < 0.0) == m.lower_is_better;
     let style = if better { Style::default().fg(t.target) } else { Style::default().fg(t.distractor) };
-    Span::styled(format!(" {d:>+4.0}"), style)
+    Span::styled(format!(" {d:>+5.prec$}", prec = m.decimals), style)
 }
 
 const COL: usize = 22;
 
 /// Fila de métrica con su diferencia.
-fn metric(t: &Theme, label: &str, value: String, d: Span<'static>, strong: bool) -> Line<'static> {
-    let vs = if strong { t.accent().add_modifier(Modifier::BOLD) } else { t.text() };
-    let mut l = row(label, &value, COL, t.dim(), vs);
-    l.spans.push(d);
+fn metric_line(t: &Theme, m: &Metric) -> Line<'static> {
+    let vs = if m.strong { t.accent().add_modifier(Modifier::BOLD) } else { t.text() };
+    let mut l = row(m.label, &m.value, COL, t.dim(), vs);
+    l.spans.push(delta(t, m));
     l
 }
 
@@ -258,12 +451,36 @@ fn summary(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let Some(s) = &app.session else { return };
     let Some(st) = &s.stats else { return };
-    let (title, mut body) = match s.cfg.mode {
-        GameKind::Decision => summary_decision(t, s, st),
-        GameKind::Targets => summary_targets(t, s, st),
-    };
+    let title = report::title(s, st);
+    let (metrics, notes) = report::summary(s, st);
+    let mut body: Vec<PLine> = Vec::new();
+    // Cifra grande de la métrica principal, solo si cabe entera.
+    let main = metrics.iter().find(|m| m.strong);
+    if let (Some(m), true) = (main, area.height >= 24) {
+        let digits: String = m.value.chars().filter(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            for (i, r) in big(&digits).into_iter().enumerate() {
+                let mut spans = vec![Span::styled(r, Style::default().fg(t.target))];
+                if i == 1 {
+                    let unit = m.value.trim_start_matches(|c: char| c.is_ascii_digit()).trim();
+                    spans.push(Span::styled(format!("  {unit} · {}", m.label), t.dim()));
+                }
+                body.push((Line::from(spans), 4));
+            }
+            body.push((Line::raw(""), 4));
+        }
+    }
     if s.prev.is_some() {
-        body.insert(0, (Line::styled(format!("{:>w$}", "vs anterior", w = COL + 12), t.dim()), 2));
+        body.push((Line::styled(format!("{:>w$}", "vs anterior", w = COL + 12), t.dim()), 2));
+    }
+    for m in &metrics {
+        body.push((metric_line(t, m), m.prio));
+    }
+    body.push((Line::raw(""), 3));
+    for (n, p) in notes {
+        if !n.is_empty() {
+            body.push((Line::styled(n, t.dim()), p));
+        }
     }
     body.push((Line::raw(""), 3));
     body.push((Line::styled("los tiempos incluyen la latencia de la", t.dim()), 0));
@@ -271,79 +488,7 @@ fn summary(f: &mut Frame, app: &App, area: Rect) {
     if let Some(n) = &app.notice {
         body.push((Line::styled(n.clone(), Style::default().fg(t.distractor)), 0));
     }
-    panel(f, area, t, &title, "Enter otra · p progreso · Esc", body);
-}
-
-fn summary_decision(t: &Theme, s: &Session, st: &Stats) -> (String, Vec<PLine>) {
-    let p = s.prev.as_ref();
-    let mut title = format!("{} · {} · {}", s.cfg.mode.label(), s.cfg.difficulty.label(), st.trials);
-    if s.baseline {
-        title = format!("baseline · {} · {}", s.cfg.mode.label(), st.trials);
-    }
-    if let (Difficulty::Adaptive, Some(l)) = (s.cfg.difficulty, s.final_level()) {
-        title.push_str(&format!(" · niv {l}"));
-    }
-    let body = vec![
-        (metric(t, "mediana", ms(st.median_ms), delta(t, st.median_ms, p.and_then(|p| p.median_ms), true, 1.0), false), 0),
-        (metric(t, "media", ms(st.mean_ms), Span::raw(""), false), 2),
-        (metric(t, "mejor", ms(st.best_ms), Span::raw(""), false), 1),
-        (
-            metric(t, "precisión", pct(st.accuracy), delta(t, st.accuracy, p.and_then(|p| p.accuracy), false, 100.0), false),
-            0,
-        ),
-        (metric(t, "puntaje", ms(st.ies_ms), delta(t, st.ies_ms, p.and_then(|p| p.ies_ms), true, 1.0), true), 0),
-        (Line::raw(""), 3),
-        (
-            Line::styled(
-                format!("errores {} · omisiones {} · f.alarmas {}", st.errors, st.omissions, st.false_alarms),
-                t.dim(),
-            ),
-            0,
-        ),
-        (
-            Line::styled(
-                format!(
-                    "rech.corr. {}/{} · anticip. {} · desc. {}",
-                    st.correct_rejections, st.catch_trials, st.anticipations, s.discarded
-                ),
-                t.dim(),
-            ),
-            0,
-        ),
-    ];
-    (title, body)
-}
-
-fn summary_targets(t: &Theme, s: &Session, st: &Stats) -> (String, Vec<PLine>) {
-    let p = s.prev.as_ref();
-    let secs = s.timer.map(|tm| tm.total.as_secs_f64()).unwrap_or(s.cfg.targets_secs as f64);
-    let rate = if secs > 0.0 { st.hits as f64 / secs } else { 0.0 };
-    let title = format!("{} · {:.0} s", s.cfg.mode.label(), secs);
-    let hits = |x: &Stats| Some(x.hits as f64);
-    let body = vec![
-        (metric(t, "aciertos", st.hits.to_string(), delta(t, hits(st), p.and_then(hits), false, 1.0), false), 0),
-        (metric(t, "fallos", (st.misses + st.anticipations).to_string(), Span::raw(""), false), 0),
-        (
-            metric(t, "precisión", pct(st.accuracy), delta(t, st.accuracy, p.and_then(|p| p.accuracy), false, 100.0), false),
-            0,
-        ),
-        (metric(t, "ritmo", format!("{rate:.1}/s"), Span::raw(""), false), 1),
-        (
-            metric(
-                t,
-                "entre aciertos",
-                ms(st.median_ms),
-                delta(t, st.median_ms, p.and_then(|p| p.median_ms), true, 1.0),
-                false,
-            ),
-            0,
-        ),
-        (metric(t, "mejor", ms(st.best_ms), Span::raw(""), false), 2),
-        (metric(t, "puntaje", ms(st.ies_ms), delta(t, st.ies_ms, p.and_then(|p| p.ies_ms), true, 1.0), true), 0),
-        (Line::raw(""), 3),
-        (Line::styled(format!("anticip. {} · desc. {}", st.anticipations, s.discarded), t.dim()), 1),
-    ];
-    (title, body)
+    panel(f, area, t, &title, "Enter otra · p progreso · a aim · Esc", body);
 }
 
 const BARS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -374,12 +519,12 @@ pub fn bars(values: &[Option<f64>], rows: usize) -> Vec<String> {
         .collect()
 }
 
-fn short_date(d: &str) -> String {
+pub(crate) fn short_date(d: &str) -> String {
     d.get(5..16).map(|x| x.replace('T', " ")).unwrap_or_else(|| d.to_string())
 }
 
 /// Compara la última sesión con la mediana de las 5 anteriores.
-fn trend(t: &Theme, vals: &[f64], lower_is_better: bool) -> Span<'static> {
+pub(crate) fn trend(t: &Theme, vals: &[f64], lower_is_better: bool) -> Span<'static> {
     let Some((&last, before)) = vals.split_last() else { return Span::raw("") };
     let window = &before[before.len().saturating_sub(5)..];
     let Some(base) = stats::median(window) else { return Span::raw("") };
@@ -393,6 +538,12 @@ fn trend(t: &Theme, vals: &[f64], lower_is_better: bool) -> Span<'static> {
     }
 }
 
+/// Nombre de una vista del progreso.
+pub(crate) fn view_name(i: usize) -> &'static str {
+    let (k, b) = PROGRESS_VIEWS[i % PROGRESS_VIEWS.len()];
+    if b { "baseline" } else { k.label() }
+}
+
 fn progress(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let (kind, baseline) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
@@ -401,11 +552,9 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
 
     let framed = area.width >= 50 && area.height >= 18;
     let inner = if framed {
-        let block = Block::bordered()
-            .border_style(t.dim())
-            .title(Line::styled(" progreso ", t.accent()))
-            .title_bottom(Line::styled(" ←→ vista · Esc ", t.dim()));
+        let block = frame_block(t, "progreso", "←→ vista · Esc");
         let r = block.inner(area);
+        f.render_widget(Clear, area);
         f.render_widget(block, area);
         Rect { x: r.x + 2, y: r.y + 1, width: r.width.saturating_sub(4), height: r.height.saturating_sub(1) }
     } else {
@@ -413,14 +562,15 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
     };
     let width = inner.width as usize;
 
-    let mut tabs = Vec::new();
-    for (i, (k, b)) in PROGRESS_VIEWS.iter().enumerate() {
-        let name = if *b { "baseline" } else { k.label() };
-        let style = if i == app.progress_view { t.accent().add_modifier(Modifier::UNDERLINED) } else { t.dim() };
-        tabs.push(Span::styled(name, style));
-        tabs.push(Span::raw("  "));
-    }
-    tabs.push(Span::styled(format!("({})", list.len()), t.dim()));
+    let tabs = vec![
+        Span::styled("‹ ", t.dim()),
+        Span::styled(view_name(app.progress_view), t.accent().add_modifier(Modifier::BOLD)),
+        Span::styled(" ›", t.dim()),
+        Span::styled(
+            format!("  {}/{} · {} sesiones", app.progress_view + 1, PROGRESS_VIEWS.len(), list.len()),
+            t.dim(),
+        ),
+    ];
     let mut lines: Vec<Line> = vec![Line::from(tabs), Line::raw("")];
 
     if list.is_empty() {
@@ -432,22 +582,14 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             _ => 1,
         };
         let recent = &list[list.len().saturating_sub(width)..];
-        let targets = kind == GameKind::Targets;
-        type Get = fn(&Stats) -> Option<f64>;
-        type Fmt = fn(Option<f64>) -> String;
-        let metrics: [(&str, Get, bool, Fmt); 3] = [
-            (if targets { "entre aciertos" } else { "mediana" }, |s| s.median_ms, true, ms),
-            ("precisión", |s| s.accuracy, false, pct),
-            ("puntaje", |s| s.ies_ms, true, ms),
-        ];
-        for (label, get, lower, fmt) in metrics {
-            let vals: Vec<Option<f64>> = recent.iter().map(|s| get(&s.stats)).collect();
+        for m in report::series(kind) {
+            let vals: Vec<Option<f64>> = recent.iter().map(|s| (m.get)(&s.stats)).collect();
             let present: Vec<f64> = vals.iter().flatten().copied().collect();
             let lo = present.iter().copied().reduce(f64::min);
             let hi = present.iter().copied().reduce(f64::max);
-            let head = format!("{label:<15}{:>9}  ", fmt(vals.last().copied().flatten()));
-            let range = format!("{} – {}", fmt(lo), fmt(hi));
-            let mut spans = vec![Span::styled(head, t.text()), trend(t, &present, lower)];
+            let head = format!("{:<15}{:>9}  ", m.label, (m.fmt)(vals.last().copied().flatten()));
+            let range = format!("{} – {}", (m.fmt)(lo), (m.fmt)(hi));
+            let mut spans = vec![Span::styled(head, t.text()), trend(t, &present, m.lower_is_better)];
             let used: usize = spans.iter().map(|s| s.width()).sum();
             if width > used + range.chars().count() + 2 {
                 spans.push(Span::raw(" ".repeat(width - used - range.chars().count())));
@@ -458,23 +600,23 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             let col_w = (width / vals.len().max(1)).clamp(1, 3);
             for b in bars(&vals, chart_rows) {
                 let wide: String = b.chars().flat_map(|c| std::iter::repeat_n(c, col_w)).collect();
-                lines.push(Line::styled(wide, Style::default().fg(t.dim)));
+                lines.push(Line::styled(wide, Style::default().fg(t.chart)));
             }
         }
         lines.push(Line::raw(""));
-        let second = if targets { "aciertos" } else { "mediana" };
-        lines.push(Line::styled(format!("{:<12}{:>9}{:>7}{:>10}", "fecha UTC", second, "prec", "puntaje"), t.dim()));
+        let (second, main) = report::main_column(kind);
+        let (last_name, last) = report::score_column(kind);
+        lines.push(Line::styled(format!("{:<12}{:>9}{:>7}{:>10}", "fecha UTC", second, "prec", last_name), t.dim()));
         let reserve = if framed { 0 } else { 1 };
         let room = (inner.height as usize).saturating_sub(lines.len() + reserve);
         for s in list.iter().rev().take(room) {
-            let second = if targets { s.stats.hits.to_string() } else { ms(s.stats.median_ms) };
             lines.push(Line::styled(
                 format!(
                     "{:<12}{:>9}{:>7}{:>10}",
                     short_date(&s.date),
-                    second,
+                    main(&s.stats),
                     pct(s.stats.accuracy),
-                    ms(s.stats.ies_ms)
+                    last(&s.stats)
                 ),
                 t.text(),
             ));
@@ -495,12 +637,153 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Color según la tasa de acierto: verde si es buena, rojo si es baja.
+fn rate_style(t: &Theme, rate: Option<f64>) -> Style {
+    match rate {
+        Some(r) if r >= 0.85 => Style::default().fg(t.target),
+        Some(r) if r < 0.7 => Style::default().fg(t.distractor),
+        Some(_) => t.text(),
+        None => t.dim(),
+    }
+}
+
+/// Cuerpo de la pantalla de puntería: rosa de 8 direcciones, tabla y conclusiones.
+pub(crate) fn aim_body(t: &Theme, r: &aim::AimReport, width: u16) -> Vec<PLine> {
+    let cell = |d: usize| -> Vec<Span<'static>> {
+        let ds = &r.dirs[d];
+        let txt = if ds.n == 0 {
+            format!("{} --", aim::ARROWS[d])
+        } else {
+            format!("{} {} {}", aim::ARROWS[d], pct(ds.hit_rate), ms(ds.median_ms).replace(" ms", ""))
+        };
+        vec![Span::styled(format!("{txt:<13}"), rate_style(t, ds.hit_rate))]
+    };
+    let line = |parts: Vec<Vec<Span<'static>>>| Line::from(parts.into_iter().flatten().collect::<Vec<_>>());
+    let pad = |n: usize| vec![Span::raw(" ".repeat(n))];
+    let mut out: Vec<PLine> = vec![
+        (
+            Line::styled(
+                format!("{} movimientos · {} sesiones · acierto% y ms por dirección", r.total, r.sessions),
+                t.dim(),
+            ),
+            1,
+        ),
+        (Line::raw(""), 3),
+        (line(vec![pad(13), cell(2)]), 0),
+        (line(vec![pad(2), cell(3), pad(9), cell(1)]), 0),
+        (line(vec![cell(4), pad(1), vec![Span::styled("·", t.accent())], pad(12), cell(0)]), 0),
+        (line(vec![pad(2), cell(5), pad(9), cell(7)]), 0),
+        (line(vec![pad(13), cell(6)]), 0),
+        (Line::raw(""), 3),
+    ];
+    if width >= 50 {
+        out.push((
+            Line::styled(format!("{:<14}{:>4}{:>8}{:>8}{:>9}{:>9}", "dirección", "n", "acierto", "ms", "pasarse", "lateral"), t.dim()),
+            4,
+        ));
+        for d in 0..8 {
+            let ds = &r.dirs[d];
+            let f1 = |v: Option<f64>| v.map(|x| format!("{x:+.1}")).unwrap_or_else(|| "-".into());
+            out.push((
+                Line::styled(
+                    format!(
+                        "{:<14}{:>4}{:>8}{:>8}{:>9}{:>9}",
+                        format!("{} {}", aim::ARROWS[d], aim::NAMES[d]),
+                        ds.n,
+                        pct(ds.hit_rate),
+                        ms(ds.median_ms).replace(" ms", ""),
+                        f1(ds.along),
+                        f1(ds.across)
+                    ),
+                    rate_style(t, ds.hit_rate),
+                ),
+                4,
+            ));
+        }
+        out.push((Line::raw(""), 4));
+    }
+    for (i, tip) in aim::insights(r).into_iter().enumerate() {
+        out.push((Line::from(vec![Span::styled("• ", t.accent()), Span::styled(tip, t.text())]), if i == 0 { 0 } else { 1 }));
+    }
+    out
+}
+
+fn aim_screen(f: &mut Frame, app: &App, area: Rect) {
+    let Some(r) = &app.aim else { return };
+    let body = aim_body(&app.theme, r, area.width);
+    panel(f, area, &app.theme, "puntería por dirección", "pasarse: + te pasas, − corto · Esc", body);
+}
+
 /// Punto de fijación en el centro.
 pub fn fixation(buf: &mut Buffer, area: Rect, theme: &Theme) {
     let x = area.x + area.width / 2;
     let y = area.y + area.height / 2;
     if let Some(c) = buf.cell_mut((x, y)) {
-        c.set_char('•').set_style(theme.text());
+        if theme.code {
+            // Como el cursor de una terminal.
+            c.set_char('_').set_style(theme.accent().add_modifier(Modifier::BOLD));
+        } else {
+            c.set_char('•').set_style(theme.text());
+        }
+    }
+}
+
+/// Dibuja el recuadro con el estilo del tema.
+pub fn draw_box_themed(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: Option<char>, theme: &Theme) {
+    if theme.code {
+        draw_box_code(buf, r, fill, color, label);
+    } else {
+        draw_box(buf, r, fill, color, label);
+    }
+}
+
+/// Texto con el que se rellenan los recuadros del estilo de código.
+const CODE: &str = "let mut buf=Vec::with_capacity(n);for i in 0..n{buf.push(f(i)?);}Ok(buf)";
+
+/// Estilo de código: el relleno es un bloque de texto "seleccionado" (fondo de color) y
+/// el hueco es un marco de líneas finas con el interior vacío.
+pub fn draw_box_code(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: Option<char>) {
+    let r = r.intersection(buf.area);
+    if r.width == 0 || r.height == 0 {
+        return;
+    }
+    let code: Vec<char> = CODE.chars().collect();
+    let dark = Color::Rgb(8, 14, 10);
+    let (right, bottom) = (r.x + r.width - 1, r.y + r.height - 1);
+    for y in r.y..=bottom {
+        for x in r.x..=right {
+            let (top, bot, left, rgt) = (y == r.y, y == bottom, x == r.x, x == right);
+            let (ch, st) = match fill {
+                Fill::Filled => {
+                    let i = (x as usize * 7 + y as usize * 31) % code.len();
+                    (code[i], Style::default().fg(dark).bg(color))
+                }
+                Fill::Hollow => {
+                    let ch = match (top, bot, left, rgt) {
+                        (true, _, true, _) => '┌',
+                        (true, _, _, true) => '┐',
+                        (_, true, true, _) => '└',
+                        (_, true, _, true) => '┘',
+                        (true, _, _, _) | (_, true, _, _) => '─',
+                        (_, _, true, _) | (_, _, _, true) => '│',
+                        _ => ' ',
+                    };
+                    (ch, Style::default().fg(color))
+                }
+            };
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_char(ch).set_style(st);
+            }
+        }
+    }
+    let Some(label) = label else { return };
+    let (lx, ly) = (r.x + r.width / 2, r.y + r.height / 2);
+    if let Some(c) = buf.cell_mut((lx, ly)) {
+        let st = match fill {
+            Fill::Filled => Style::default().fg(dark).bg(color).add_modifier(Modifier::BOLD),
+            Fill::Hollow => Style::default().fg(color).add_modifier(Modifier::BOLD),
+        };
+        c.set_char(label).set_style(st);
     }
 }
 
@@ -548,15 +831,17 @@ pub fn draw_box(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: Opti
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::config::Difficulty;
+    use crate::stats::Stats;
     use crate::config::Config;
     use crate::modes::{Method, TrialRecord};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::time::Instant;
 
-    fn screen_text(app: &App, w: u16, h: u16) -> String {
+    pub(crate) fn screen_text(app: &App, w: u16, h: u16) -> String {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| draw(f, app)).unwrap();
         let buf = t.backend().buffer();
@@ -566,11 +851,16 @@ mod tests {
             .join("\n")
     }
 
-    fn app(cfg: Config, w: u16, h: u16) -> App {
+    /// App con el tema clásico (estas pruebas son del estilo de recuadros).
+    pub(crate) fn app_with(cfg: Config, w: u16, h: u16) -> App {
         App::with_history(cfg, Rect::new(0, 0, w, h), std::env::temp_dir().join("rt-no-existe.jsonl"))
     }
 
-    fn trial(outcome: Outcome, rt: Option<f64>) -> TrialRecord {
+    fn app(cfg: Config, w: u16, h: u16) -> App {
+        app_with(Config { theme: crate::config::ThemeName::Dark, ..cfg }, w, h)
+    }
+
+    pub(crate) fn trial(outcome: Outcome, rt: Option<f64>) -> TrialRecord {
         TrialRecord {
             index: 0,
             level: Some(1),
@@ -583,10 +873,16 @@ mod tests {
             outcome,
             method: Method::Mouse,
             anticipation: false,
+            start: None,
+            target_pos: None,
+            click: None,
+            score: None,
+            radius: None,
+            warmup: false,
         }
     }
 
-    fn session_rec(mode: GameKind, baseline: bool, incomplete: bool, med: f64) -> SessionRecord {
+    pub(crate) fn session_rec(mode: GameKind, baseline: bool, incomplete: bool, med: f64) -> SessionRecord {
         SessionRecord {
             version: 1,
             date: "2026-11-01T10:00:00Z".into(),
@@ -634,7 +930,7 @@ mod tests {
         let mut a = app(Config::default(), 80, 24);
         a.menu_idx = 1;
         let text = screen_text(&a, 80, 24);
-        assert!(text.contains("‹ decisión ›") && text.contains("┌"), "{text}");
+        assert!(text.contains("‹ decisión ›") && text.contains("╭") && text.contains("▀"), "{text}");
         let text = screen_text(&a, 40, 12);
         assert!(text.contains("empezar") && text.contains("salir"), "{text}");
     }
@@ -666,6 +962,41 @@ mod tests {
         assert_eq!(sparkline(&[Some(5.0), Some(5.0)]), "▄▄");
         assert_eq!(sparkline(&[None, None]), "  ");
         assert_eq!(bars(&[Some(0.0), Some(1.0)], 2), vec![" █", "▁█"]);
+    }
+
+    #[test]
+    fn big_digits() {
+        assert_eq!(big("1"), [String::from("▄█ "), String::from(" █ "), String::from("▀▀▀")]);
+        assert_eq!(big("70")[0], "▀▀█ █▀█");
+    }
+
+    #[test]
+    fn effects_draw_inside_area() {
+        use crate::modes::Flash;
+        let mut a = app(Config::default(), 40, 12);
+        let now = Instant::now();
+        for kind in [FlashKind::Hit, FlashKind::Wrong, FlashKind::Reveal, FlashKind::Miss] {
+            a.effects.push((Flash { kind, rect: Rect::new(0, 0, 4, 3) }, now));
+            a.effects.push((Flash { kind, rect: Rect::new(36, 8, 4, 3) }, now));
+        }
+        let area = Rect::new(0, 0, 40, 11);
+        let mut buf = Buffer::empty(area);
+        draw_effects(&mut buf, area, &a, now + EFFECT / 2);
+        assert!((0..40).any(|x| buf[(x, 0)].symbol() != " "));
+    }
+
+    #[test]
+    fn background_paints_gradient_and_grid() {
+        let a = app(Config::default(), 40, 12);
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        paint_background(&mut buf, area, &a.theme);
+        assert_ne!(buf[(0, 0)].bg, buf[(0, 11)].bg);
+        assert_eq!(buf[(3, 1)].symbol(), "·");
+        let plain = app(Config { background: crate::config::Background::None, ..Config::default() }, 40, 12);
+        let mut buf = Buffer::empty(area);
+        paint_background(&mut buf, area, &plain.theme);
+        assert_eq!(buf[(0, 0)].bg, Color::Reset);
     }
 
     #[test]

@@ -47,19 +47,66 @@ impl Staircase {
     /// alarma o anticipación). El rechazo correcto no mueve la escalera ni corta la racha.
     pub fn update(&mut self, outcome: Outcome) {
         match outcome {
-            Outcome::Hit => {
-                self.streak += 1;
-                if self.streak >= UP_AFTER {
-                    self.level = (self.level + 1).min(MAX_LEVEL);
-                    self.streak = 0;
-                }
-            }
+            Outcome::Hit => self.signal(true),
             Outcome::CorrectRejection => {}
             Outcome::Error | Outcome::Omission | Outcome::FalseAlarm | Outcome::Anticipation | Outcome::Miss => {
-                self.level = self.level.saturating_sub(1);
-                self.streak = 0;
+                self.signal(false)
             }
         }
+    }
+
+    /// Corta la racha sin cambiar de nivel.
+    pub fn reset_streak(&mut self) {
+        self.streak = 0;
+    }
+
+    /// Un éxito suma a la racha (3 seguidos suben un nivel); un fallo baja uno.
+    pub fn signal(&mut self, success: bool) {
+        if success {
+            self.streak += 1;
+            if self.streak >= UP_AFTER {
+                self.level = (self.level + 1).min(MAX_LEVEL);
+                self.streak = 0;
+            }
+        } else {
+            self.level = self.level.saturating_sub(1);
+            self.streak = 0;
+        }
+    }
+}
+
+/// Blancos adaptativo: un acierto rápido (hasta `fast_ms`) es un éxito; uno lento (más
+/// de 1.5 veces eso) o un clic en el vacío es un fallo; lo de en medio solo corta la racha.
+pub fn targets_signal(outcome: Outcome, rt_ms: Option<f64>, fast_ms: u64) -> Option<bool> {
+    let fast = fast_ms as f64;
+    match (outcome, rt_ms) {
+        (Outcome::Hit, Some(rt)) if rt <= fast => Some(true),
+        (Outcome::Hit, Some(rt)) if rt > fast * 1.5 => Some(false),
+        (Outcome::Hit, _) => None,
+        (Outcome::Miss | Outcome::Anticipation, _) => Some(false),
+        _ => None,
+    }
+}
+
+/// Blancos: exponente con que se sortea la distancia al centro (r = u^e, con u uniforme).
+/// En el nivel 0 (e = 2.5) casi todos salen cerca del centro; en el 9 (e = 0.35) la
+/// mayoría sale cerca del borde.
+pub fn spawn_exponent(level: usize) -> f32 {
+    let t = level.min(MAX_LEVEL) as f32 / MAX_LEVEL as f32;
+    2.5 * (0.35f32 / 2.5).powf(t)
+}
+
+/// Distancia media al centro (0 a 1) que da un nivel: 1 / (e + 1).
+#[cfg(test)]
+pub fn mean_radius(level: usize) -> f32 {
+    1.0 / (spawn_exponent(level) + 1.0)
+}
+
+impl Staircase {
+    /// Nivel inicial a partir del nivel final de la sesión anterior: uno menos, para
+    /// calentar sin empezar desde cero.
+    pub fn resume(last_final: Option<usize>, start: usize) -> Staircase {
+        Staircase::new(last_final.map(|l| l.saturating_sub(1)).unwrap_or(start))
     }
 }
 
@@ -116,6 +163,30 @@ mod tests {
             s.update(Hit);
         }
         assert_eq!(s.level, MAX_LEVEL);
+    }
+
+    #[test]
+    fn spawn_gets_farther_with_level() {
+        assert!(mean_radius(0) < 0.3);
+        assert!(mean_radius(9) > 0.7);
+        for l in 1..=MAX_LEVEL {
+            assert!(mean_radius(l) > mean_radius(l - 1));
+        }
+    }
+
+    #[test]
+    fn targets_signal_rewards_fast_hits() {
+        assert_eq!(targets_signal(Outcome::Hit, Some(600.0), 900), Some(true));
+        assert_eq!(targets_signal(Outcome::Hit, Some(1000.0), 900), None);
+        assert_eq!(targets_signal(Outcome::Hit, Some(1500.0), 900), Some(false));
+        assert_eq!(targets_signal(Outcome::Miss, Some(300.0), 900), Some(false));
+    }
+
+    #[test]
+    fn resume_starts_one_below_last_level() {
+        assert_eq!(Staircase::resume(Some(5), 0).level, 4);
+        assert_eq!(Staircase::resume(Some(0), 0).level, 0);
+        assert_eq!(Staircase::resume(None, 2).level, 2);
     }
 
     #[test]

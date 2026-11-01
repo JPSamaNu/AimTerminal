@@ -6,6 +6,10 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeName {
+    /// Verde fósforo con aspecto de salida de terminal.
+    Matrix,
+    /// Cian y magenta con aspecto de salida de terminal.
+    Cyber,
     Dark,
     Mono,
 }
@@ -15,6 +19,18 @@ pub enum ThemeName {
 pub enum Fill {
     Filled,
     Hollow,
+}
+
+/// Fondo de las pantallas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Background {
+    /// Degradado oscuro con una rejilla de puntos tenue.
+    Grid,
+    /// Solo el degradado.
+    Plain,
+    /// El fondo de la terminal, sin pintar nada.
+    None,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,13 +54,30 @@ impl Difficulty {
 pub enum GameKind {
     Decision,
     Targets,
+    Flick,
+    Tracking,
+    Reaction,
+    GoNoGo,
 }
 
 impl GameKind {
+    pub const ALL: [GameKind; 6] = [
+        GameKind::Decision,
+        GameKind::Targets,
+        GameKind::Flick,
+        GameKind::Tracking,
+        GameKind::Reaction,
+        GameKind::GoNoGo,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             GameKind::Decision => "decisión",
             GameKind::Targets => "blancos",
+            GameKind::Flick => "flick",
+            GameKind::Tracking => "seguimiento",
+            GameKind::Reaction => "reacción",
+            GameKind::GoNoGo => "go/no-go",
         }
     }
 
@@ -53,14 +86,26 @@ impl GameKind {
         match self {
             GameKind::Decision => "decision",
             GameKind::Targets => "targets",
+            GameKind::Flick => "flick",
+            GameKind::Tracking => "tracking",
+            GameKind::Reaction => "reaction",
+            GameKind::GoNoGo => "gonogo",
         }
     }
 
     pub fn next(self) -> GameKind {
-        match self {
-            GameKind::Decision => GameKind::Targets,
-            GameKind::Targets => GameKind::Decision,
-        }
+        let i = GameKind::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        GameKind::ALL[(i + 1) % GameKind::ALL.len()]
+    }
+
+    pub fn prev(self) -> GameKind {
+        let i = GameKind::ALL.iter().position(|k| *k == self).unwrap_or(0);
+        GameKind::ALL[(i + GameKind::ALL.len() - 1) % GameKind::ALL.len()]
+    }
+
+    /// Modos con dificultad (fija o adaptativa).
+    pub fn adaptive(self) -> bool {
+        matches!(self, GameKind::Decision | GameKind::Targets)
     }
 }
 
@@ -87,6 +132,9 @@ pub struct Config {
     pub difficulty: Difficulty,
     pub start_level: usize,
     pub theme: ThemeName,
+    pub background: Background,
+    /// Efectos breves al acertar o fallar.
+    pub effects: bool,
     pub target_fill: Fill,
     pub distractor_fill: Fill,
     pub target_color: String,
@@ -98,6 +146,33 @@ pub struct Config {
     pub targets_secs: u64,
     pub targets_w: u16,
     pub targets_h: u16,
+    /// Dificultad de Blancos, aparte de la de Decisión.
+    pub targets_difficulty: Difficulty,
+    /// Blancos con dificultad fija: nivel de 0 a 9; más alto, más lejos del centro.
+    pub targets_level: usize,
+    /// Blancos adaptativo: un acierto cuenta para subir de nivel si tarda como mucho esto.
+    pub targets_adapt_ms: u64,
+    /// Modo Flick: blancos por sesión, tamaño y tiempo límite de cada uno.
+    pub flick_trials: usize,
+    pub flick_w: u16,
+    pub flick_h: u16,
+    pub flick_timeout_ms: u64,
+    /// Modo Seguimiento: duración, tamaño y velocidad (celdas por segundo).
+    pub tracking_secs: u64,
+    pub tracking_w: u16,
+    pub tracking_h: u16,
+    pub tracking_speed: f32,
+    /// Reacción pura y Go/No-Go: intentos y tiempo para responder.
+    pub reaction_trials: usize,
+    pub gonogo_trials: usize,
+    /// Proporción de intentos "no-go" (no responder).
+    pub nogo_ratio: f64,
+    pub go_timeout_ms: u64,
+    /// El texto de fondo del estilo de código también avanza mientras juegas.
+    pub ambient_motion: bool,
+    /// Intentos de calentamiento al empezar cada sesión: no cuentan para las estadísticas
+    /// ni para terminar. En los modos por tiempo el reloj arranca al acabar.
+    pub warmup_trials: usize,
 }
 
 impl Default for Config {
@@ -116,7 +191,9 @@ impl Default for Config {
             box_h: 3,
             difficulty: Difficulty::Adaptive,
             start_level: 0,
-            theme: ThemeName::Dark,
+            theme: ThemeName::Matrix,
+            background: Background::Grid,
+            effects: true,
             target_fill: Fill::Filled,
             distractor_fill: Fill::Hollow,
             target_color: "green".into(),
@@ -126,6 +203,23 @@ impl Default for Config {
             targets_secs: 30,
             targets_w: 6,
             targets_h: 3,
+            targets_difficulty: Difficulty::Adaptive,
+            targets_level: 3,
+            targets_adapt_ms: 900,
+            flick_trials: 30,
+            flick_w: 4,
+            flick_h: 2,
+            flick_timeout_ms: 3000,
+            tracking_secs: 30,
+            tracking_w: 6,
+            tracking_h: 3,
+            tracking_speed: 12.0,
+            reaction_trials: 20,
+            gonogo_trials: 30,
+            nogo_ratio: 0.25,
+            go_timeout_ms: 1000,
+            ambient_motion: true,
+            warmup_trials: 3,
         }
     }
 }
@@ -140,6 +234,8 @@ impl Config {
             trials: 30,
             difficulty: Difficulty::Fixed,
             theme: self.theme,
+            background: self.background,
+            effects: self.effects,
             target_fill: self.target_fill,
             distractor_fill: self.distractor_fill,
             target_color: self.target_color.clone(),
@@ -163,7 +259,103 @@ impl Config {
         self.targets_secs = self.targets_secs.clamp(5, 600);
         self.targets_w = self.targets_w.clamp(3, 20);
         self.targets_h = self.targets_h.clamp(3, 10);
+        self.targets_level = self.targets_level.min(9);
+        self.targets_adapt_ms = self.targets_adapt_ms.clamp(200, 5000);
+        self.flick_trials = self.flick_trials.clamp(1, 500);
+        self.flick_w = self.flick_w.clamp(1, 20);
+        self.flick_h = self.flick_h.clamp(1, 10);
+        self.flick_timeout_ms = self.flick_timeout_ms.clamp(500, 20_000);
+        self.tracking_secs = self.tracking_secs.clamp(5, 600);
+        self.tracking_w = self.tracking_w.clamp(2, 20);
+        self.tracking_h = self.tracking_h.clamp(1, 10);
+        self.tracking_speed = self.tracking_speed.clamp(1.0, 80.0);
+        self.reaction_trials = self.reaction_trials.clamp(1, 500);
+        self.gonogo_trials = self.gonogo_trials.clamp(1, 500);
+        self.nogo_ratio = self.nogo_ratio.clamp(0.0, 0.6);
+        self.go_timeout_ms = self.go_timeout_ms.clamp(300, 10_000);
+        self.warmup_trials = self.warmup_trials.min(20);
     }
+
+    /// Dificultad del modo elegido (Blancos tiene la suya).
+    pub fn mode_difficulty(&self) -> Difficulty {
+        match self.mode {
+            GameKind::Targets => self.targets_difficulty,
+            _ => self.difficulty,
+        }
+    }
+
+    /// Siguiente opción de dificultad del modo elegido. En Decisión alterna fija y
+    /// adaptativa; en Blancos recorre fácil, normal, difícil, experto y adaptativa.
+    pub fn cycle_difficulty(&mut self, forward: bool) {
+        match self.mode {
+            GameKind::Decision => {
+                self.difficulty = match self.difficulty {
+                    Difficulty::Fixed => Difficulty::Adaptive,
+                    Difficulty::Adaptive => Difficulty::Fixed,
+                }
+            }
+            GameKind::Targets => {
+                let n = TARGET_PRESETS.len() + 1;
+                let current = match self.targets_difficulty {
+                    Difficulty::Adaptive => TARGET_PRESETS.len(),
+                    Difficulty::Fixed => TARGET_PRESETS
+                        .iter()
+                        .position(|(l, _)| *l >= self.targets_level)
+                        .unwrap_or(TARGET_PRESETS.len() - 1),
+                };
+                let next = if forward { (current + 1) % n } else { (current + n - 1) % n };
+                if next == TARGET_PRESETS.len() {
+                    self.targets_difficulty = Difficulty::Adaptive;
+                } else {
+                    self.targets_difficulty = Difficulty::Fixed;
+                    self.targets_level = TARGET_PRESETS[next].0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Nombre de la dificultad del modo elegido, si tiene.
+    pub fn difficulty_label(&self) -> Option<String> {
+        match (self.mode, self.mode_difficulty()) {
+            (GameKind::Decision, d) => Some(d.label().to_string()),
+            (GameKind::Targets, Difficulty::Adaptive) => Some("adaptativa".to_string()),
+            (GameKind::Targets, Difficulty::Fixed) => Some(targets_level_label(self.targets_level)),
+            _ => None,
+        }
+    }
+
+    /// Intentos que cuentan para terminar una sesión (en los modos por cantidad).
+    pub fn session_trials(&self) -> usize {
+        match self.mode {
+            GameKind::Decision => self.trials,
+            GameKind::Flick => self.flick_trials,
+            GameKind::Reaction => self.reaction_trials,
+            GameKind::GoNoGo => self.gonogo_trials,
+            GameKind::Targets | GameKind::Tracking => 0,
+        }
+    }
+
+    /// Duración de la sesión en los modos por tiempo.
+    pub fn session_secs(&self) -> Option<u64> {
+        match self.mode {
+            GameKind::Targets => Some(self.targets_secs),
+            GameKind::Tracking => Some(self.tracking_secs),
+            _ => None,
+        }
+    }
+}
+
+/// Dificultades fijas de Blancos: nivel y nombre.
+pub const TARGET_PRESETS: [(usize, &str); 4] = [(1, "fácil"), (3, "normal"), (6, "difícil"), (9, "experto")];
+
+/// Nombre de un nivel de Blancos: el del preajuste si coincide, si no "nivel N".
+pub fn targets_level_label(level: usize) -> String {
+    TARGET_PRESETS
+        .iter()
+        .find(|(l, _)| *l == level)
+        .map(|(_, n)| n.to_string())
+        .unwrap_or_else(|| format!("nivel {level}"))
 }
 
 /// Carpeta de datos: %APPDATA%\term-aim (o ~/.config/term-aim fuera de Windows).
@@ -224,12 +416,14 @@ uso:
   rt export [-o ARCHIVO] exporta los intentos a CSV (stdout por defecto)
 
 opciones:
-  --mode decision|blancos  modo de juego
-  --theme dark|mono      paleta
+  --mode decision|blancos|flick|seguimiento|reaccion|gonogo  modo de juego
+  --theme matrix|cyber|dark|mono  paleta (matrix y cyber imitan salida de terminal)
+  --plain                sin fondo ni efectos (estilo sobrio)
   --trials N             intentos por sesión
   --timeout MS           tiempo límite por intento (modo fijo)
   --fixed | --adaptive   dificultad
   --pixel                intentar mouse en píxeles (SGR 1016)
+  --warmup N             intentos de calentamiento (0 lo quita)
   -h, --help             esta ayuda
   -V, --version          versión
 
@@ -239,6 +433,10 @@ fn parse_mode(v: Option<&str>) -> Result<GameKind, String> {
     match v {
         Some("decision" | "decisión" | "d") => Ok(GameKind::Decision),
         Some("blancos" | "targets" | "b") => Ok(GameKind::Targets),
+        Some("flick" | "f") => Ok(GameKind::Flick),
+        Some("seguimiento" | "tracking" | "s") => Ok(GameKind::Tracking),
+        Some("reaccion" | "reacción" | "reaction" | "r") => Ok(GameKind::Reaction),
+        Some("gonogo" | "go" | "g") => Ok(GameKind::GoNoGo),
         other => Err(format!("modo desconocido: {}", other.unwrap_or(""))),
     }
 }
@@ -260,6 +458,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, cfg: &mut Config) -> 
             "--theme" => {
                 cfg.theme = match it.next().as_deref() {
                     Some("mono") => ThemeName::Mono,
+                    Some("matrix") => ThemeName::Matrix,
+                    Some("cyber") => ThemeName::Cyber,
                     Some("dark") => ThemeName::Dark,
                     other => return Err(format!("tema desconocido: {}", other.unwrap_or(""))),
                 }
@@ -276,9 +476,19 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I, cfg: &mut Config) -> 
                     .and_then(|v| v.parse().ok())
                     .ok_or("--timeout necesita milisegundos")?
             }
+            "--plain" => {
+                cfg.background = Background::None;
+                cfg.effects = false;
+            }
             "--fixed" => cfg.difficulty = Difficulty::Fixed,
             "--adaptive" => cfg.difficulty = Difficulty::Adaptive,
             "--pixel" => cfg.pixel_mouse = true,
+            "--warmup" => {
+                cfg.warmup_trials = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--warmup necesita un número")?
+            }
             "-h" | "--help" => cli.command = Command::Help,
             "-V" | "--version" => cli.command = Command::Version,
             other => return Err(format!("argumento desconocido: {other}\n\n{USAGE}")),
@@ -307,6 +517,21 @@ mod tests {
         assert_eq!(c.theme, ThemeName::Mono);
         assert_eq!(c.trials, 10);
         assert_eq!(c.difficulty, Difficulty::Fixed);
+    }
+
+    #[test]
+    fn targets_difficulty_cycles_presets_then_adaptive() {
+        let mut c = Config { mode: GameKind::Targets, targets_difficulty: Difficulty::Fixed, targets_level: 1, ..Config::default() };
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            c.cycle_difficulty(true);
+            seen.push(c.difficulty_label().unwrap());
+        }
+        assert_eq!(seen, ["normal", "difícil", "experto", "adaptativa", "fácil"]);
+        c.cycle_difficulty(false);
+        assert_eq!(c.difficulty_label().unwrap(), "adaptativa");
+        // La dificultad de Decisión no cambia.
+        assert_eq!(c.difficulty, Config::default().difficulty);
     }
 
     #[test]

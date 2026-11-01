@@ -1,5 +1,6 @@
 //! Historial en JSON Lines (una sesión por línea) y exportación a CSV.
 
+use crate::aim;
 use crate::config::{self, Config, Difficulty};
 use crate::modes::TrialRecord;
 use crate::stats::Stats;
@@ -68,7 +69,7 @@ pub fn load(path: &Path) -> (Vec<SessionRecord>, usize) {
 }
 
 pub const CSV_HEADER: &str = "session_date,mode,baseline,incomplete,difficulty,trial,level,n_boxes,\
-target_present,target_w,target_h,cursor_dist,rt_ms,outcome,method,anticipation";
+target_present,target_w,target_h,cursor_dist,rt_ms,outcome,method,anticipation,start_x,start_y,target_x,target_y,click_x,click_y,direction,overshoot,lateral,score,radius,warmup";
 
 fn opt<T: std::fmt::Display>(v: Option<T>) -> String {
     v.map(|x| x.to_string()).unwrap_or_default()
@@ -87,7 +88,7 @@ pub fn write_csv<W: Write>(sessions: &[SessionRecord], mut w: W) -> io::Result<u
             let outcome = serde_json::to_value(t.outcome).ok().and_then(|v| v.as_str().map(String::from));
             writeln!(
                 w,
-                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 s.date,
                 s.mode,
                 s.baseline,
@@ -104,12 +105,38 @@ pub fn write_csv<W: Write>(sessions: &[SessionRecord], mut w: W) -> io::Result<u
                 outcome.unwrap_or_default(),
                 t.method.label(),
                 t.anticipation,
+                geometry_columns(t),
             )?;
             n += 1;
         }
     }
     w.flush()?;
     Ok(n)
+}
+
+/// Columnas de posición y del análisis por dirección (vacías si no hay datos).
+fn geometry_columns(t: &TrialRecord) -> String {
+    let p = |v: Option<[f32; 2]>| match v {
+        Some([x, y]) => format!("{x:.2},{y:.2}"),
+        None => ",".to_string(),
+    };
+    let (dir, along, across) = match aim::geometry(t) {
+        Some((d, err)) => (
+            aim::NAMES[d].to_string(),
+            opt(err.map(|e| format!("{:.2}", e.0))),
+            opt(err.map(|e| format!("{:.2}", e.1))),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
+    format!(
+        "{},{},{},{dir},{along},{across},{},{},{}",
+        p(t.start),
+        p(t.target_pos),
+        p(t.click),
+        opt(t.score.map(|s| format!("{s:.3}"))),
+        opt(t.radius.map(|r| format!("{r:.3}"))),
+        t.warmup
+    )
 }
 
 pub fn now_iso() -> String {
@@ -171,6 +198,12 @@ mod tests {
                 outcome: Outcome::Hit,
                 method: Method::Mouse,
                 anticipation: false,
+                start: None,
+                target_pos: None,
+                click: None,
+                score: None,
+                radius: None,
+                warmup: false,
             }],
         }
     }
@@ -201,8 +234,19 @@ mod tests {
         assert_eq!(lines[0], CSV_HEADER);
         assert_eq!(
             lines[1],
-            "2026-11-01T10:00:00Z,decision,false,false,adaptive,0,2,4,true,6,3,12.35,401.3,hit,mouse,false"
+            "2026-11-01T10:00:00Z,decision,false,false,adaptive,0,2,4,true,6,3,12.35,401.3,hit,mouse,false,,,,,,,,,,,,false"
         );
         assert_eq!(lines[1].split(',').count(), CSV_HEADER.split(',').count());
+
+        let mut rec = sample(false);
+        rec.trials[0].start = Some([10.0, 10.0]);
+        rec.trials[0].target_pos = Some([30.0, 10.0]);
+        rec.trials[0].click = Some([31.0, 10.0]);
+        let mut out = Vec::new();
+        write_csv(&[rec], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let row = text.lines().nth(1).unwrap();
+        assert!(row.ends_with("10.00,10.00,30.00,10.00,31.00,10.00,derecha,1.00,0.00,,,false"), "{row}");
+        assert_eq!(row.split(',').count(), CSV_HEADER.split(',').count());
     }
 }

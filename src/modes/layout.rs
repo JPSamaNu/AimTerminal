@@ -97,6 +97,47 @@ pub fn contains(r: &Rect, x: f32, y: f32) -> bool {
     x >= r.x as f32 && x < (r.x + r.width) as f32 && y >= r.y as f32 && y < (r.y + r.height) as f32
 }
 
+/// Distancia de un recuadro al centro del área, de 0 (centro) a 1 (borde), tratando el
+/// área como una elipse para que "lejos" signifique lo mismo en horizontal y en vertical.
+pub fn normalized_radius(area: Rect, r: &Rect) -> f32 {
+    let (cx, cy) = center(&area);
+    let (x, y) = center(r);
+    let hw = ((area.width.saturating_sub(r.width)) as f32 / 2.0).max(1.0);
+    let hh = ((area.height.saturating_sub(r.height)) as f32 / 2.0).max(1.0);
+    (((x - cx) / hw).powi(2) + ((y - cy) / hh).powi(2)).sqrt().min(1.0)
+}
+
+/// Coloca un recuadro a una distancia del centro sorteada como `u^exponent` (u uniforme
+/// entre 0 y 1): con exponente alto salen cerca del centro, con uno bajo cerca del borde.
+pub fn spawn_by_radius(
+    area: Rect,
+    others: &[Rect],
+    w: u16,
+    h: u16,
+    avoid: Option<(f32, f32)>,
+    exponent: f32,
+    rng: &mut fastrand::Rng,
+) -> Option<Rect> {
+    if w > area.width || h > area.height {
+        return None;
+    }
+    let (cx, cy) = center(&area);
+    let (hw, hh) = ((area.width - w) as f32 / 2.0, (area.height - h) as f32 / 2.0);
+    for _ in 0..300 {
+        let r = rng.f32().powf(exponent);
+        let a = rng.f32() * std::f32::consts::TAU;
+        let x = (cx + r * hw * a.cos() - w as f32 / 2.0).round().clamp(area.x as f32, (area.right() - w) as f32);
+        let y = (cy + r * hh * a.sin() - h as f32 / 2.0).round().clamp(area.y as f32, (area.bottom() - h) as f32);
+        let rect = Rect { x: x as u16, y: y as u16, width: w, height: h };
+        let free = others.iter().all(|p| !overlaps_with_gap(p, &rect));
+        let clear = avoid.is_none_or(|(px, py)| !contains(&rect, px, py));
+        if free && clear {
+            return Some(rect);
+        }
+    }
+    None
+}
+
 /// Distancia del cursor a un punto, en anchos de celda; la vertical cuenta doble
 /// porque una celda mide más o menos el doble de alto que de ancho.
 pub fn cell_distance(from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -154,6 +195,26 @@ mod tests {
             let r = find_spot(a, &others, 6, 3, Some((20.5, 5.5)), &mut rng).unwrap();
             assert!(others.iter().all(|o| !overlaps_with_gap(o, &r)));
             assert!(!contains(&r, 20.5, 5.5));
+        }
+    }
+
+    #[test]
+    fn spawn_exponent_controls_distance_to_center() {
+        let mut rng = fastrand::Rng::with_seed(11);
+        let a = area(100, 30);
+        let avg = |e: f32, rng: &mut fastrand::Rng| {
+            let n = 400;
+            (0..n)
+                .map(|_| normalized_radius(a, &spawn_by_radius(a, &[], 6, 3, None, e, rng).unwrap()))
+                .sum::<f32>()
+                / n as f32
+        };
+        let near = avg(2.5, &mut rng);
+        let far = avg(0.35, &mut rng);
+        assert!(near < 0.35 && far > 0.65, "{near} {far}");
+        for _ in 0..200 {
+            let r = spawn_by_radius(a, &[], 6, 3, None, 0.35, &mut rng).unwrap();
+            assert!(r.right() <= 100 && r.bottom() <= 30);
         }
     }
 

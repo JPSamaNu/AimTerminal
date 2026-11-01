@@ -5,8 +5,11 @@
 //! [`GameMode`], añadirlo a `GameKind` y crearlo en [`create`].
 
 pub mod decision;
+pub mod flick;
 pub mod layout;
+pub mod single;
 pub mod targets;
+pub mod tracking;
 
 use crate::config::{Config, GameKind};
 use crate::theme::Theme;
@@ -84,6 +87,29 @@ pub struct TrialRecord {
     pub outcome: Outcome,
     pub method: Method,
     pub anticipation: bool,
+    /// Cursor al aparecer el estímulo, en celdas (x, y).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<[f32; 2]>,
+    /// Centro del objetivo; en un clic fallido, el del objetivo más cercano.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_pos: Option<[f32; 2]>,
+    /// Dónde se hizo clic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click: Option<[f32; 2]>,
+    /// Métrica propia del modo entre 0 y 1 (Seguimiento: fracción del tiempo encima).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    /// Blancos: distancia del objetivo al centro del área, de 0 (centro) a 1 (borde).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    /// Intento de calentamiento: se guarda, pero no entra a las estadísticas.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub warmup: bool,
+}
+
+/// Punto como arreglo para guardarlo en JSON de forma compacta.
+pub fn pt(p: (f32, f32)) -> [f32; 2] {
+    [p.0, p.1]
 }
 
 /// Parámetros de dificultad de un intento.
@@ -103,6 +129,27 @@ pub enum Response {
     Key(usize),
     /// Clic en coordenadas de celda.
     Click { x: f32, y: f32 },
+    /// Barra espaciadora (modos de respuesta simple).
+    Press,
+}
+
+/// Efecto visual que deja una respuesta; la aplicación decide si mostrarlo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// Acierto: anillo que se expande desde el recuadro.
+    Hit,
+    /// Eligió un distractor o respondió sin objetivo.
+    Wrong,
+    /// Dónde estaba el objetivo que no se eligió.
+    Reveal,
+    /// Clic en el vacío.
+    Miss,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Flash {
+    pub kind: FlashKind,
+    pub rect: Rect,
 }
 
 #[derive(Debug, PartialEq)]
@@ -114,8 +161,8 @@ pub enum Step {
 
 pub trait GameMode {
     fn id(&self) -> &'static str;
-    /// Empieza un intento dentro de `area`.
-    fn start_trial(&mut self, area: Rect, params: &Params, now: Instant);
+    /// Empieza un intento dentro de `area`; `cursor` es la última posición conocida.
+    fn start_trial(&mut self, area: Rect, params: &Params, now: Instant, cursor: Option<(f32, f32)>);
     /// Próximo momento en que el modo necesita `tick`.
     fn deadline(&self) -> Option<Instant>;
     fn tick(&mut self, now: Instant) -> Step;
@@ -127,11 +174,25 @@ pub trait GameMode {
     /// Hay un intento en curso (fijación o estímulo).
     fn in_trial(&self) -> bool;
     fn render(&self, buf: &mut Buffer, area: Rect, theme: &Theme);
+    /// Efectos del último intento terminado (se vacían al leerlos).
+    fn take_flashes(&mut self) -> Vec<Flash> {
+        Vec::new()
+    }
+    /// Movimiento del mouse (para los modos que siguen el cursor).
+    fn on_move(&mut self, _pos: (f32, f32), _at: Instant) {}
+    /// Si este intento cuenta para terminar una sesión por cantidad.
+    fn counts(&self, _rec: &TrialRecord) -> bool {
+        true
+    }
 }
 
 pub fn create(cfg: &Config, rng: fastrand::Rng) -> Box<dyn GameMode> {
     match cfg.mode {
         GameKind::Decision => Box::new(decision::Decision::new(cfg, rng)),
         GameKind::Targets => Box::new(targets::Targets::new(cfg, rng)),
+        GameKind::Flick => Box::new(flick::Flick::new(cfg, rng)),
+        GameKind::Tracking => Box::new(tracking::Tracking::new(cfg, rng)),
+        GameKind::Reaction => Box::new(single::Single::new(cfg, rng, 0.0)),
+        GameKind::GoNoGo => Box::new(single::Single::new(cfg, rng, cfg.nogo_ratio)),
     }
 }

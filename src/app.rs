@@ -1,10 +1,12 @@
 //! Estado de la aplicación, pantallas y bucle de eventos.
 
+use crate::aim::{self, AimReport};
+use crate::ambient::Ambient;
 use crate::config::{Config, Difficulty, GameKind};
 use crate::difficulty::{self, Staircase};
 use crate::history::{self, SessionRecord};
 use crate::input::{self, Input, Mouse};
-use crate::modes::{self, GameMode, Outcome, Params, Response, Step, TrialRecord};
+use crate::modes::{self, Flash, GameMode, Outcome, Params, Response, Step, TrialRecord};
 use crate::render;
 use crate::stats::{self, Stats};
 use crate::term::{self, Tui};
@@ -22,17 +24,38 @@ pub enum MenuItem {
     Difficulty,
     Baseline,
     Progress,
+    Aim,
     Quit,
 }
 
-pub const MENU: [MenuItem; 6] =
-    [MenuItem::Start, MenuItem::Mode, MenuItem::Difficulty, MenuItem::Baseline, MenuItem::Progress, MenuItem::Quit];
+pub const MENU: [MenuItem; 7] = [
+    MenuItem::Start,
+    MenuItem::Mode,
+    MenuItem::Difficulty,
+    MenuItem::Baseline,
+    MenuItem::Progress,
+    MenuItem::Aim,
+    MenuItem::Quit,
+];
+
+/// Sesiones recientes que entran al análisis de puntería.
+const AIM_SESSIONS: usize = 30;
 
 /// Vistas de la pantalla de progreso: (modo, baseline).
-pub const PROGRESS_VIEWS: [(GameKind, bool); 3] =
-    [(GameKind::Decision, false), (GameKind::Decision, true), (GameKind::Targets, false)];
+pub const PROGRESS_VIEWS: [(GameKind, bool); 7] = [
+    (GameKind::Decision, false),
+    (GameKind::Decision, true),
+    (GameKind::Targets, false),
+    (GameKind::Flick, false),
+    (GameKind::Tracking, false),
+    (GameKind::Reaction, false),
+    (GameKind::GoNoGo, false),
+];
 
 const COUNTDOWN: u8 = 3;
+/// Duración de un efecto y separación entre sus cuadros.
+pub const EFFECT: Duration = Duration::from_millis(380);
+const EFFECT_FRAME: Duration = Duration::from_millis(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -42,6 +65,7 @@ pub enum Screen {
     Paused(PauseReason),
     Summary,
     Progress,
+    Aim,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +131,8 @@ pub struct Session {
     pub cfg: Config,
     pub baseline: bool,
     pub records: Vec<TrialRecord>,
+    /// Intentos que cuentan para terminar (en Flick los clics fallidos no cuentan).
+    pub counted: usize,
     /// Intentos descartados por pérdida de foco, cambio de tamaño o pausa.
     pub discarded: usize,
     pub last: Option<TrialRecord>,
@@ -117,7 +143,10 @@ pub struct Session {
     pub stair: Option<Staircase>,
     /// Solo en sesiones por tiempo (modo Blancos).
     pub timer: Option<Timer>,
+    /// Intentos de calentamiento que faltan.
+    pub warmup_left: usize,
     shown_secs: u64,
+    pub started: Instant,
 }
 
 impl Session {
@@ -129,7 +158,7 @@ impl Session {
                 min_boxes: self.cfg.targets_count,
                 max_boxes: self.cfg.targets_count,
                 timeout: Duration::from_secs(self.cfg.targets_secs),
-                level: None,
+                level: self.level(),
             };
         }
         if let Some(st) = &self.stair {
@@ -146,15 +175,42 @@ impl Session {
     }
 
     pub fn done(&self) -> bool {
-        self.timer.is_none() && self.records.len() >= self.cfg.trials
+        self.timer.is_none() && self.counted >= self.cfg.session_trials()
     }
 
     pub fn final_level(&self) -> Option<usize> {
         self.stair.as_ref().map(|s| s.level)
     }
 
+    /// Nivel actual: el de la escalera o, en Blancos fijo, el elegido.
+    pub fn level(&self) -> Option<usize> {
+        match (&self.stair, self.cfg.mode) {
+            (Some(st), _) => Some(st.level),
+            (None, GameKind::Targets) => Some(self.cfg.targets_level),
+            _ => None,
+        }
+    }
+
+    /// Mueve la escalera con el resultado de un intento.
+    fn update_stair(&mut self, rec: &TrialRecord) {
+        let Some(st) = self.stair.as_mut() else { return };
+        match self.cfg.mode {
+            GameKind::Targets => match difficulty::targets_signal(rec.outcome, rec.rt_ms, self.cfg.targets_adapt_ms) {
+                Some(ok) => st.signal(ok),
+                None => st.reset_streak(),
+            },
+            _ => st.update(rec.outcome),
+        }
+    }
+
+    /// Intentos contados (sin calentamiento) con este resultado.
     pub fn count(&self, o: Outcome) -> usize {
-        self.records.iter().filter(|r| r.outcome == o).count()
+        self.records.iter().filter(|r| !r.warmup && r.outcome == o).count()
+    }
+
+    /// Calentamiento en curso: (hechos, total).
+    pub fn warming_up(&self) -> Option<(usize, usize)> {
+        (self.warmup_left > 0).then(|| (self.cfg.warmup_trials - self.warmup_left, self.cfg.warmup_trials))
     }
 
     fn to_record(&self, stats: Stats, incomplete: bool, pixel_mouse: bool, now: Instant) -> SessionRecord {
@@ -162,7 +218,7 @@ impl Session {
             version: 1,
             date: history::now_iso(),
             mode: self.mode.id().to_string(),
-            difficulty: self.cfg.difficulty,
+            difficulty: self.cfg.mode_difficulty(),
             baseline: self.baseline,
             incomplete,
             discarded: self.discarded,
@@ -176,19 +232,31 @@ impl Session {
     }
 }
 
-/// Última sesión completa comparable: mismo modo, mismo tipo y misma dificultad.
-pub fn last_comparable(
-    history: &[SessionRecord],
-    mode: GameKind,
-    baseline: bool,
-    difficulty: Difficulty,
-) -> Option<&SessionRecord> {
+/// Última sesión completa comparable: mismo modo, mismo tipo y misma dificultad (en
+/// Blancos fijo, también el mismo nivel, porque cambia qué tan lejos salen los blancos).
+pub fn last_comparable<'a>(history: &'a [SessionRecord], cfg: &Config, baseline: bool) -> Option<&'a SessionRecord> {
+    let mode = cfg.mode;
+    let difficulty = cfg.mode_difficulty();
     history.iter().rev().find(|s| {
-        !s.incomplete
-            && s.mode == mode.id()
-            && s.baseline == baseline
-            && (mode == GameKind::Targets || baseline || s.difficulty == difficulty)
+        let same_difficulty = match mode {
+            GameKind::Decision => baseline || s.difficulty == difficulty,
+            GameKind::Targets => {
+                s.difficulty == difficulty
+                    && (difficulty == Difficulty::Adaptive || s.config.targets_level == cfg.targets_level)
+            }
+            _ => true,
+        };
+        !s.incomplete && s.mode == mode.id() && s.baseline == baseline && same_difficulty
     })
+}
+
+/// Nivel final de la última sesión adaptativa del modo, para empezar desde ahí.
+pub fn last_adaptive_level(history: &[SessionRecord], mode: GameKind) -> Option<usize> {
+    history
+        .iter()
+        .rev()
+        .find(|s| !s.incomplete && !s.baseline && s.mode == mode.id() && s.difficulty == Difficulty::Adaptive)
+        .and_then(|s| s.final_level)
 }
 
 pub struct App {
@@ -203,8 +271,18 @@ pub struct App {
     pub history: Vec<SessionRecord>,
     pub bad_lines: usize,
     pub progress_view: usize,
+    /// Análisis de puntería abierto y a qué pantalla volver.
+    pub aim: Option<AimReport>,
+    aim_back: Screen,
     /// Aviso de una sola vez (p. ej. un error al guardar).
     pub notice: Option<String>,
+    /// Efectos en curso y cuándo empezaron.
+    pub effects: Vec<(Flash, Instant)>,
+    last_effect_frame: Option<Instant>,
+    /// Salida falsa de fondo del estilo de código.
+    pub ambient: Ambient,
+    /// Prompt que imita al de la terminal en el estilo de código.
+    pub prompt: String,
     history_path: PathBuf,
     /// Tipo de la última sesión, para repetirla desde el resumen.
     last_baseline: bool,
@@ -235,7 +313,13 @@ impl App {
             history,
             bad_lines,
             progress_view: 0,
+            aim: None,
+            aim_back: Screen::Menu,
             notice: None,
+            effects: Vec::new(),
+            last_effect_frame: None,
+            ambient: Ambient::new(fastrand::Rng::new()),
+            prompt: shell_prompt(),
             history_path,
             last_baseline: false,
             quit: false,
@@ -250,22 +334,27 @@ impl App {
     pub fn start_session(&mut self, baseline: bool, now: Instant) {
         let cfg = if baseline { self.cfg.baseline() } else { self.cfg.clone() };
         let mode = modes::create(&cfg, fastrand::Rng::new());
-        let stair = (cfg.mode == GameKind::Decision && cfg.difficulty == Difficulty::Adaptive)
-            .then(|| Staircase::new(cfg.start_level));
-        let timer = (cfg.mode == GameKind::Targets).then(|| Timer::new(Duration::from_secs(cfg.targets_secs)));
-        let prev = last_comparable(&self.history, cfg.mode, baseline, cfg.difficulty).map(|s| s.stats.clone());
+        // La escalera empieza un nivel por debajo de donde terminó la sesión anterior.
+        let stair = (cfg.mode.adaptive() && cfg.mode_difficulty() == Difficulty::Adaptive)
+            .then(|| Staircase::resume(last_adaptive_level(&self.history, cfg.mode), cfg.start_level));
+        let timer = cfg.session_secs().map(|secs| Timer::new(Duration::from_secs(secs)));
+        let prev = last_comparable(&self.history, &cfg, baseline).map(|s| s.stats.clone());
+        let cfg_warmup = cfg.warmup_trials;
         self.session = Some(Session {
             mode,
             cfg,
             baseline,
             records: Vec::new(),
+            counted: 0,
             discarded: 0,
             last: None,
             stats: None,
             prev,
             stair,
             timer,
+            warmup_left: cfg_warmup,
             shown_secs: 0,
+            started: now,
         });
         self.last_baseline = baseline;
         self.notice = None;
@@ -275,9 +364,10 @@ impl App {
 
     fn begin_trial(&mut self, now: Instant) {
         let area = render::play_area(self.size);
+        let cursor = self.mouse.pos;
         if let Some(s) = self.session.as_mut() {
             let params = s.params();
-            s.mode.start_trial(area, &params, now);
+            s.mode.start_trial(area, &params, now, cursor);
         }
         self.dirty = true;
     }
@@ -292,6 +382,7 @@ impl App {
 
     fn pause(&mut self, reason: PauseReason, now: Instant) {
         self.discard_trial();
+        self.effects.clear();
         if let Some(t) = self.session.as_mut().and_then(|s| s.timer.as_mut()) {
             t.stop(now);
         }
@@ -314,8 +405,23 @@ impl App {
             Step::Done(mut rec) => {
                 let Some(s) = self.session.as_mut() else { return };
                 rec.index = s.records.len();
-                if let Some(st) = s.stair.as_mut() {
-                    st.update(rec.outcome);
+                let flashes = s.mode.take_flashes();
+                if self.theme.effects {
+                    self.effects.extend(flashes.into_iter().map(|f| (f, now)));
+                }
+                s.update_stair(&rec);
+                if s.warmup_left > 0 {
+                    rec.warmup = true;
+                    if s.mode.counts(&rec) {
+                        s.warmup_left -= 1;
+                        if s.warmup_left == 0
+                            && let Some(t) = s.timer.as_mut()
+                        {
+                            t.start(now);
+                        }
+                    }
+                } else if s.mode.counts(&rec) {
+                    s.counted += 1;
                 }
                 s.last = Some(rec.clone());
                 s.records.push(rec);
@@ -337,6 +443,7 @@ impl App {
             t.stop(now);
         }
         s.mode.abort();
+        self.effects.clear();
         let st = stats::compute(&s.records);
         if complete || !s.records.is_empty() {
             let mut rec = s.to_record(st.clone(), !complete, pixel, now);
@@ -361,6 +468,21 @@ impl App {
         self.screen = Screen::Progress;
     }
 
+    /// Analiza la puntería con los intentos de las últimas sesiones completas (de todos
+    /// los modos con mouse), leyendo el historial con el detalle de cada intento.
+    fn open_aim(&mut self) {
+        let (all, _) = history::load(&self.history_path);
+        let recent: Vec<&SessionRecord> = all
+            .iter()
+            .rev()
+            .filter(|s| !s.incomplete && s.trials.iter().any(|t| t.start.is_some()))
+            .take(AIM_SESSIONS)
+            .collect();
+        self.aim = Some(aim::analyze(recent.iter().flat_map(|s| s.trials.iter()), recent.len()));
+        self.aim_back = self.screen;
+        self.screen = Screen::Aim;
+    }
+
     fn leave_session(&mut self, now: Instant) {
         self.discard_trial();
         if self.session.is_some() && !matches!(self.screen, Screen::Summary) {
@@ -374,27 +496,45 @@ impl App {
         self.quit = true;
     }
 
+    /// El texto de fondo avanza solo fuera del juego, para no distraer durante los intentos.
+    fn sync_ambient(&mut self, now: Instant) {
+        if self.theme.ambient.is_some() && (self.screen != Screen::Game || self.cfg.ambient_motion) {
+            self.ambient.schedule(now);
+        } else {
+            self.ambient.stop();
+        }
+    }
+
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        let own = self.screen_deadline(now);
+        [own, self.ambient.due()].into_iter().flatten().min()
+    }
+
+    fn screen_deadline(&self, now: Instant) -> Option<Instant> {
         match self.screen {
             Screen::Countdown { next, .. } => Some(next),
             Screen::Game => {
                 let s = self.session.as_ref()?;
                 let timer = s.timer.and_then(|t| t.next_change(now));
-                match (s.mode.deadline(), timer) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                }
+                let effect = (!self.effects.is_empty()).then(|| now + EFFECT_FRAME);
+                [s.mode.deadline(), timer, effect].into_iter().flatten().min()
             }
             _ => None,
         }
     }
 
     fn tick(&mut self, now: Instant) {
+        if self.ambient.advance(now) {
+            self.dirty = true;
+        }
         match self.screen {
             Screen::Countdown { left, next } if now >= next => {
                 if left <= 1 {
                     self.screen = Screen::Game;
-                    if let Some(t) = self.session.as_mut().and_then(|s| s.timer.as_mut()) {
+                    // Con calentamiento pendiente, el reloj espera a que termine.
+                    if let Some(s) = self.session.as_mut().filter(|s| s.warmup_left == 0)
+                        && let Some(t) = s.timer.as_mut()
+                    {
                         t.start(now);
                     }
                     self.begin_trial(now);
@@ -404,6 +544,7 @@ impl App {
                 self.dirty = true;
             }
             Screen::Game => {
+                self.advance_effects(now);
                 let Some(s) = self.session.as_mut() else { return };
                 if let Some(t) = s.timer {
                     if t.left(now).is_zero() {
@@ -421,6 +562,21 @@ impl App {
                 self.on_step(step, now);
             }
             _ => {}
+        }
+    }
+
+    /// Quita los efectos terminados y pide un cuadro nuevo como mucho cada `EFFECT_FRAME`,
+    /// aunque lleguen muchos eventos de movimiento del mouse.
+    fn advance_effects(&mut self, now: Instant) {
+        if self.effects.is_empty() {
+            return;
+        }
+        let before = self.effects.len();
+        self.effects.retain(|(_, t)| now.saturating_duration_since(*t) < EFFECT);
+        let due = self.last_effect_frame.is_none_or(|t| now.saturating_duration_since(t) >= EFFECT_FRAME);
+        if due || self.effects.len() != before {
+            self.last_effect_frame = Some(now);
+            self.dirty = true;
         }
     }
 
@@ -455,8 +611,12 @@ impl App {
                     self.on_step(step, ev.at);
                 }
             }
-            // Solo actualiza la posición del cursor (ya hecho en input); no redibuja.
-            Input::Move => {}
+            // La posición ya quedó en `self.mouse`; solo la pasan los modos que la siguen.
+            Input::Move => {
+                if let (Screen::Game, Some(s), Some(p)) = (self.screen, self.session.as_mut(), self.mouse.pos) {
+                    s.mode.on_move(p, ev.at);
+                }
+            }
             Input::Resize(w, h) => {
                 self.size = Rect { x: 0, y: 0, width: w, height: h };
                 self.dirty = true;
@@ -466,6 +626,7 @@ impl App {
                     } else if self.screen == Screen::Game {
                         // El intento se dibujó con otro tamaño: no vale.
                         self.discard_trial();
+                        self.effects.clear();
                         self.begin_trial(ev.at);
                     }
                 }
@@ -490,6 +651,13 @@ impl App {
             },
             Screen::Countdown { .. } | Screen::Game => match code {
                 KeyCode::Esc => self.pause(PauseReason::User, at),
+                KeyCode::Char(' ') if self.screen == Screen::Game => {
+                    if let Some(s) = self.session.as_mut() {
+                        let step = s.mode.respond(Response::Press, at);
+                        self.on_step(step, at);
+                    }
+                    return;
+                }
                 KeyCode::Char(c) if self.screen == Screen::Game && c.is_ascii_digit() && c != '0' => {
                     if let Some(s) = self.session.as_mut() {
                         let step = s.mode.respond(Response::Key(c as usize - '0' as usize), at);
@@ -513,6 +681,7 @@ impl App {
                     self.session = None;
                     self.open_progress();
                 }
+                KeyCode::Char('a') => self.open_aim(),
                 KeyCode::Esc => {
                     self.session = None;
                     self.screen = Screen::Menu;
@@ -527,6 +696,13 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter => self.screen = Screen::Menu,
                 _ => return,
             },
+            Screen::Aim => match code {
+                KeyCode::Esc | KeyCode::Enter => {
+                    self.aim = None;
+                    self.screen = self.aim_back;
+                }
+                _ => return,
+            },
         }
         self.dirty = true;
     }
@@ -534,21 +710,24 @@ impl App {
     fn select(&mut self, code: KeyCode, now: Instant) {
         let toggle = matches!(code, KeyCode::Left | KeyCode::Right);
         match MENU[self.menu_idx] {
+            MenuItem::Mode if code == KeyCode::Left => self.cfg.mode = self.cfg.mode.prev(),
             MenuItem::Mode => self.cfg.mode = self.cfg.mode.next(),
-            MenuItem::Difficulty if self.cfg.mode == GameKind::Decision => {
-                self.cfg.difficulty = match self.cfg.difficulty {
-                    Difficulty::Fixed => Difficulty::Adaptive,
-                    Difficulty::Adaptive => Difficulty::Fixed,
-                }
-            }
+            MenuItem::Difficulty if self.cfg.mode.adaptive() => self.cfg.cycle_difficulty(code != KeyCode::Left),
             _ if toggle => {}
             MenuItem::Start => self.start_session(false, now),
             MenuItem::Baseline => self.start_session(true, now),
             MenuItem::Progress => self.open_progress(),
+            MenuItem::Aim => self.open_aim(),
             MenuItem::Quit => self.quit = true,
             MenuItem::Difficulty => {}
         }
     }
+}
+
+/// Prompt parecido al de la terminal: `PS C:\ruta>` en Windows, `~/ruta $` fuera.
+fn shell_prompt() -> String {
+    let dir = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
+    if cfg!(windows) { format!("PS {dir}> ") } else { format!("{dir} $ ") }
 }
 
 /// Bucle dirigido por eventos: dibuja solo cuando algo cambió y duerme en `poll` hasta
@@ -568,6 +747,7 @@ pub fn run(term: &mut Tui, app: &mut App, start: Option<bool>) -> io::Result<()>
             app.dirty = false;
         }
         let now = Instant::now();
+        app.sync_ambient(now);
         let timeout =
             app.next_deadline(now).map(|d| d.saturating_duration_since(now)).unwrap_or(Duration::from_secs(3600));
         if let Some(ev) = input::read(timeout, &mut app.mouse)? {
@@ -594,6 +774,76 @@ mod tests {
         t.start(t0 + Duration::from_secs(100));
         assert_eq!(t.left(t0 + Duration::from_secs(125)), Duration::ZERO);
         assert_eq!(t.elapsed(t0 + Duration::from_secs(125)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn warmup_is_marked_and_does_not_count() {
+        let cfg = Config { mode: GameKind::Reaction, reaction_trials: 2, warmup_trials: 2, ..Config::default() };
+        let mut a = App::with_history(cfg, Rect::new(0, 0, 80, 24), std::env::temp_dir().join("rt-no-existe.jsonl"));
+        let t0 = Instant::now();
+        a.start_session(false, t0);
+        a.screen = Screen::Game;
+        let mk = |outcome| TrialRecord {
+            index: 0,
+            level: None,
+            n_boxes: 1,
+            target_present: true,
+            target_w: 6,
+            target_h: 3,
+            cursor_dist: None,
+            rt_ms: Some(300.0),
+            outcome,
+            method: crate::modes::Method::Keyboard,
+            anticipation: false,
+            start: None,
+            target_pos: None,
+            click: None,
+            score: None,
+            radius: None,
+            warmup: false,
+        };
+        for _ in 0..3 {
+            a.on_step(Step::Done(mk(Outcome::Hit)), t0);
+        }
+        let s = a.session.as_ref().unwrap();
+        assert_eq!(s.warmup_left, 0);
+        assert_eq!(s.counted, 1);
+        assert_eq!(s.records.iter().filter(|r| r.warmup).count(), 2);
+        assert!(!s.done());
+    }
+
+    #[test]
+    fn timed_session_clock_starts_after_warmup() {
+        let cfg = Config { mode: GameKind::Targets, warmup_trials: 1, ..Config::default() };
+        let mut a = App::with_history(cfg, Rect::new(0, 0, 80, 24), std::env::temp_dir().join("rt-no-existe.jsonl"));
+        let t0 = Instant::now();
+        a.start_session(false, t0);
+        a.screen = Screen::Countdown { left: 1, next: t0 };
+        a.tick(t0);
+        let left = |a: &App, at| a.session.as_ref().unwrap().timer.unwrap().left(at);
+        assert_eq!(left(&a, t0 + Duration::from_secs(10)), Duration::from_secs(30));
+        let rec = TrialRecord {
+            index: 0,
+            level: None,
+            n_boxes: 3,
+            target_present: true,
+            target_w: 6,
+            target_h: 3,
+            cursor_dist: None,
+            rt_ms: Some(400.0),
+            outcome: Outcome::Hit,
+            method: crate::modes::Method::Mouse,
+            anticipation: false,
+            start: None,
+            target_pos: None,
+            click: None,
+            score: None,
+            radius: None,
+            warmup: false,
+        };
+        let t1 = t0 + Duration::from_secs(10);
+        a.on_step(Step::Done(rec), t1);
+        assert_eq!(left(&a, t1 + Duration::from_secs(5)), Duration::from_secs(25));
     }
 
     #[test]
@@ -636,10 +886,37 @@ mod tests {
             rec(Decision, true, false, Fixed, 4.0),
             rec(Decision, false, true, Adaptive, 5.0),
         ];
-        let med = |m, b, d| last_comparable(&h, m, b, d).and_then(|s| s.stats.median_ms);
+        let med = |mode, baseline, difficulty| {
+            let cfg = Config { mode, difficulty, targets_difficulty: difficulty, ..Config::default() };
+            last_comparable(&h, &cfg, baseline).and_then(|s| s.stats.median_ms)
+        };
         assert_eq!(med(Decision, false, Adaptive), Some(1.0));
         assert_eq!(med(Decision, false, Fixed), Some(2.0));
-        assert_eq!(med(Targets, false, Fixed), Some(3.0));
+        assert_eq!(med(Targets, false, Adaptive), Some(3.0));
+        // Blancos fijo no se compara con adaptativo, ni con otro nivel fijo.
+        assert_eq!(med(Targets, false, Fixed), None);
         assert_eq!(med(Decision, true, Adaptive), Some(4.0));
+
+        let mut fixed6 = rec(Targets, false, false, Fixed, 6.0);
+        fixed6.config.targets_level = 6;
+        let h = vec![fixed6];
+        let at = |level| {
+            let cfg = Config { mode: Targets, targets_difficulty: Fixed, targets_level: level, ..Config::default() };
+            last_comparable(&h, &cfg, false).and_then(|s| s.stats.median_ms)
+        };
+        assert_eq!(at(6), Some(6.0));
+        assert_eq!(at(3), None);
+    }
+
+    #[test]
+    fn adaptive_resumes_from_last_final_level() {
+        let mut a = rec(GameKind::Targets, false, false, Difficulty::Adaptive, 1.0);
+        a.final_level = Some(7);
+        let mut b = rec(GameKind::Decision, false, false, Difficulty::Adaptive, 1.0);
+        b.final_level = Some(2);
+        let h = vec![a, b];
+        assert_eq!(last_adaptive_level(&h, GameKind::Targets), Some(7));
+        assert_eq!(last_adaptive_level(&h, GameKind::Decision), Some(2));
+        assert_eq!(last_adaptive_level(&h, GameKind::Flick), None);
     }
 }

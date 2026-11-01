@@ -8,6 +8,7 @@ use crate::history::{self, SessionRecord};
 use crate::input::{self, Input, Mouse};
 use crate::modes::{self, Flash, GameMode, Outcome, Params, Response, Step, TrialRecord};
 use crate::render;
+use crate::report;
 use crate::stats::{self, Stats};
 use crate::term::{self, Tui};
 use crate::theme::Theme;
@@ -287,6 +288,8 @@ pub struct App {
     pub history: Vec<SessionRecord>,
     pub bad_lines: usize,
     pub progress_view: usize,
+    /// Dificultad que filtra el progreso (`None`: todas).
+    pub progress_filter: Option<String>,
     /// Análisis de puntería abierto y a qué pantalla volver.
     pub aim: Option<AimReport>,
     aim_back: Screen,
@@ -329,6 +332,7 @@ impl App {
             history,
             bad_lines,
             progress_view: 0,
+            progress_filter: None,
             aim: None,
             aim_back: Screen::Menu,
             notice: None,
@@ -481,7 +485,41 @@ impl App {
 
     fn open_progress(&mut self) {
         self.progress_view = PROGRESS_VIEWS.iter().position(|(m, _)| *m == self.cfg.mode).unwrap_or(0);
+        self.progress_filter = None;
         self.screen = Screen::Progress;
+    }
+
+    /// Sesiones completas de la vista de progreso actual, sin filtrar por dificultad.
+    fn progress_sessions(&self) -> impl Iterator<Item = &SessionRecord> {
+        let (kind, baseline) = PROGRESS_VIEWS[self.progress_view % PROGRESS_VIEWS.len()];
+        self.history.iter().filter(move |s| !s.incomplete && s.baseline == baseline && s.mode == kind.id())
+    }
+
+    /// Sesiones que muestra el progreso: las de la vista, con el filtro de dificultad.
+    pub fn progress_list(&self) -> Vec<&SessionRecord> {
+        self.progress_sessions()
+            .filter(|s| self.progress_filter.is_none() || report::difficulty_key(s) == self.progress_filter)
+            .collect()
+    }
+
+    /// Dificultades presentes en la vista, en orden de aparición.
+    pub fn progress_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = Vec::new();
+        for k in self.progress_sessions().filter_map(report::difficulty_key) {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        keys
+    }
+
+    /// Todas → cada dificultad presente → todas.
+    fn cycle_progress_filter(&mut self) {
+        let keys = self.progress_keys();
+        self.progress_filter = match &self.progress_filter {
+            None => keys.first().cloned(),
+            Some(cur) => keys.iter().position(|k| k == cur).and_then(|i| keys.get(i + 1)).cloned(),
+        };
     }
 
     /// Analiza la puntería con los intentos de las últimas sesiones completas (de todos
@@ -705,10 +743,15 @@ impl App {
                 _ => return,
             },
             Screen::Progress => match code {
-                KeyCode::Tab | KeyCode::Right => self.progress_view = (self.progress_view + 1) % PROGRESS_VIEWS.len(),
-                KeyCode::BackTab | KeyCode::Left => {
-                    self.progress_view = (self.progress_view + PROGRESS_VIEWS.len() - 1) % PROGRESS_VIEWS.len()
+                KeyCode::Tab | KeyCode::Right => {
+                    self.progress_view = (self.progress_view + 1) % PROGRESS_VIEWS.len();
+                    self.progress_filter = None;
                 }
+                KeyCode::BackTab | KeyCode::Left => {
+                    self.progress_view = (self.progress_view + PROGRESS_VIEWS.len() - 1) % PROGRESS_VIEWS.len();
+                    self.progress_filter = None;
+                }
+                KeyCode::Char('d') => self.cycle_progress_filter(),
                 KeyCode::Esc | KeyCode::Enter => self.screen = Screen::Menu,
                 _ => return,
             },
@@ -922,6 +965,28 @@ mod tests {
         };
         assert_eq!(at(6), Some(6.0));
         assert_eq!(at(3), None);
+    }
+
+    #[test]
+    fn progress_filter_cycles_through_difficulties() {
+        let mut a = App::with_history(Config::default(), Rect::new(0, 0, 80, 24), std::env::temp_dir().join("rt-no-existe.jsonl"));
+        let mut easy = rec(GameKind::Targets, false, false, Difficulty::Fixed, 1.0);
+        easy.config.targets_level = 1;
+        let adaptive = rec(GameKind::Targets, false, false, Difficulty::Adaptive, 2.0);
+        let mut easy2 = rec(GameKind::Targets, false, false, Difficulty::Fixed, 3.0);
+        easy2.config.targets_level = 1;
+        a.history = vec![easy, adaptive, easy2, rec(GameKind::Decision, false, false, Difficulty::Fixed, 9.0)];
+        a.cfg.mode = GameKind::Targets;
+        a.open_progress();
+        assert_eq!(a.progress_keys(), vec!["fácil", "adaptativa"]);
+        assert_eq!(a.progress_list().len(), 3);
+        a.cycle_progress_filter();
+        assert_eq!(a.progress_filter.as_deref(), Some("fácil"));
+        assert_eq!(a.progress_list().iter().map(|s| s.stats.median_ms.unwrap()).collect::<Vec<_>>(), vec![1.0, 3.0]);
+        a.cycle_progress_filter();
+        assert_eq!(a.progress_list().len(), 1);
+        a.cycle_progress_filter();
+        assert_eq!(a.progress_filter, None);
     }
 
     #[test]

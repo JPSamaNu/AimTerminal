@@ -316,11 +316,13 @@ fn fake_hash(s: &SessionRecord) -> String {
 fn progress(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let (kind, baseline) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
-    let list: Vec<&SessionRecord> =
-        app.history.iter().filter(|s| !s.incomplete && s.baseline == baseline && s.mode == kind.id()).collect();
+    let list = app.progress_list();
     let mut cmd = format!("rt log --mode {}", kind.id());
     if baseline {
         cmd.push_str(" --baseline");
+    }
+    if let Some(f) = &app.progress_filter {
+        cmd.push_str(&format!(" --level {f}"));
     }
     let mut lines: Vec<PLine> = vec![(prompt(app, &cmd, area.width), 0)];
     lines.push((
@@ -328,6 +330,7 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("view ", t.dim()),
             Span::styled(format!("[{}/{}]", app.progress_view + 1, PROGRESS_VIEWS.len()), t.accent()),
             Span::styled(format!(" {} · {} sessions", view_name(app.progress_view), list.len()), t.dim()),
+            Span::styled(if app.progress_keys().is_empty() { "" } else { " · d filtra" }, t.dim()),
         ]),
         1,
     ));
@@ -383,7 +386,7 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
         lines.push((Line::styled(format!("warning: {} líneas dañadas ignoradas", app.bad_lines), t.dim()), 1));
     }
     // El pie siempre visible: va al final y las filas del log (prioridad 5) ceden primero.
-    lines.push((Line::styled("←→ vista · Esc", t.dim()), 0));
+    lines.push((Line::styled("←→ vista · d dificultad · Esc", t.dim()), 0));
     let lines = fit_keep_order(lines, area.height as usize);
     output(f, area, lines);
 }

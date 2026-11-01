@@ -4,7 +4,6 @@ use crate::aim;
 use crate::app::{self, App, EFFECT, MENU, MenuItem, PROGRESS_VIEWS, PauseReason, Screen, Session};
 use crate::report::{self, Metric};
 use crate::config::{Fill, GameKind};
-use crate::history::SessionRecord;
 use crate::modes::{FlashKind, Outcome};
 use crate::stats;
 use crate::theme::Theme;
@@ -546,13 +545,12 @@ pub(crate) fn view_name(i: usize) -> &'static str {
 
 fn progress(f: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
-    let (kind, baseline) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
-    let list: Vec<&SessionRecord> =
-        app.history.iter().filter(|s| !s.incomplete && s.baseline == baseline && s.mode == kind.id()).collect();
+    let (kind, _) = PROGRESS_VIEWS[app.progress_view % PROGRESS_VIEWS.len()];
+    let list = app.progress_list();
 
     let framed = area.width >= 50 && area.height >= 18;
     let inner = if framed {
-        let block = frame_block(t, "progreso", "←→ vista · Esc");
+        let block = frame_block(t, "progreso", "←→ vista · d dificultad · Esc");
         let r = block.inner(area);
         f.render_widget(Clear, area);
         f.render_widget(block, area);
@@ -571,7 +569,16 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             t.dim(),
         ),
     ];
-    let mut lines: Vec<Line> = vec![Line::from(tabs), Line::raw("")];
+    let mut lines: Vec<Line> = vec![Line::from(tabs)];
+    if !app.progress_keys().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("dificultad: ", t.dim()),
+            Span::styled(app.progress_filter.clone().unwrap_or_else(|| "todas".into()), t.accent()),
+            Span::styled(" (d)", t.dim()),
+        ]));
+    } else {
+        lines.push(Line::raw(""));
+    }
 
     if list.is_empty() {
         lines.push(Line::styled("sin sesiones completas todavía", t.dim()));
@@ -632,7 +639,7 @@ fn progress(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::raw(""));
         }
         lines.truncate(last);
-        lines.push(Line::styled("←→ vista · Esc", t.dim()));
+        lines.push(Line::styled("←→ vista · d dificultad · Esc", t.dim()));
     }
     f.render_widget(Paragraph::new(lines), inner);
 }
@@ -833,6 +840,7 @@ pub fn draw_box(buf: &mut Buffer, r: Rect, fill: Fill, color: Color, label: Opti
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::history::SessionRecord;
     use crate::config::Difficulty;
     use crate::stats::Stats;
     use crate::config::Config;

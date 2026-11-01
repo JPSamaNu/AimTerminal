@@ -3,7 +3,8 @@
 
 use crate::aim;
 use crate::app::Session;
-use crate::config::{Difficulty, GameKind};
+use crate::config::{Config, Difficulty, GameKind};
+use crate::history::SessionRecord;
 use crate::modes::{Outcome, TrialRecord};
 use crate::stats::{Stats, median};
 
@@ -233,6 +234,20 @@ fn mode_summary(s: &Session, st: &Stats) -> (Vec<Metric>, Vec<(String, u8)>) {
             )],
         ),
     }
+}
+
+/// Dificultad de una sesión guardada ("adaptativa", "fácil", "fija"…), para filtrar el
+/// progreso. `None` en los modos sin dificultad.
+pub fn difficulty_key(s: &SessionRecord) -> Option<String> {
+    let mode = *GameKind::ALL.iter().find(|k| k.id() == s.mode)?;
+    let cfg = Config {
+        mode,
+        difficulty: s.difficulty,
+        targets_difficulty: s.difficulty,
+        flick_difficulty: s.difficulty,
+        ..s.config.clone()
+    };
+    cfg.difficulty_label()
 }
 
 /// Métrica de la gráfica de progreso.

@@ -163,6 +163,17 @@ impl Session {
                 level: self.level(),
             };
         }
+        if self.cfg.mode == GameKind::Tracking {
+            let tl = difficulty::tracking_level(self.level().unwrap_or(3));
+            return Params {
+                box_w: tl.w,
+                box_h: tl.h,
+                min_boxes: 1,
+                max_boxes: 1,
+                timeout: Duration::from_secs(self.cfg.tracking_secs),
+                level: self.level(),
+            };
+        }
         if self.cfg.mode == GameKind::Targets {
             return Params {
                 box_w: self.cfg.targets_w,
@@ -212,6 +223,10 @@ impl Session {
                     None => st.reset_streak(),
                 }
             }
+            GameKind::Tracking => match difficulty::tracking_signal(rec.score) {
+                Some(ok) => st.signal(ok),
+                None => st.reset_streak(),
+            },
             _ => st.update(rec.outcome),
         }
     }
@@ -253,13 +268,10 @@ pub fn last_comparable<'a>(history: &'a [SessionRecord], cfg: &Config, baseline:
     history.iter().rev().find(|s| {
         let same_difficulty = match mode {
             GameKind::Decision => baseline || s.difficulty == difficulty,
-            GameKind::Targets => {
-                s.difficulty == difficulty
-                    && (difficulty == Difficulty::Adaptive || s.config.targets_level == cfg.targets_level)
-            }
-            GameKind::Flick => {
-                s.difficulty == difficulty
-                    && (difficulty == Difficulty::Adaptive || s.config.flick_level == cfg.flick_level)
+            // Con niveles: misma dificultad y, si es fija, el mismo nivel.
+            _ if cfg.levels().is_some() => {
+                let their_level = Config { mode, ..s.config.clone() }.fixed_level();
+                s.difficulty == difficulty && (difficulty == Difficulty::Adaptive || their_level == cfg.fixed_level())
             }
             _ => true,
         };

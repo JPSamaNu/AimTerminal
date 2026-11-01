@@ -123,7 +123,7 @@ o con `"background": "none"` y `"effects": false`, vuelve el estilo sobrio origi
   igual. Un clic fuera es un fallo y el blanco se queda. Si no lo tocas en 3 s, es una
   omisión y aparece otro. Es el modo que mejor alimenta el análisis por dirección. Tiene
   dificultad propia (ver abajo).
-- **Seguimiento**: el recuadro avanza a 12 celdas/s, rebota y cambia de rumbo. Cada
+- **Seguimiento**: el recuadro avanza (12 celdas/s en normal), rebota y cambia de rumbo. Cada
   segundo se guarda la fracción del tiempo con el cursor encima y la distancia media.
   Es el único modo que redibuja seguido (unas 30 veces por segundo) mientras juegas.
 - **Reacción pura** y **Go/No-Go**: un recuadro en el centro tras 0.8–2.5 s. Se responde
@@ -174,6 +174,22 @@ El resumen de Blancos compara la mediana de los aciertos **cerca del centro** (r
 < 0.5) con los de **lejos**, y cada intento guarda su radio (0 centro, 1 borde) en el
 historial y en el CSV (`radius`). Una sesión solo se compara con otra de la misma
 dificultad (y en fija, del mismo nivel), porque la distancia cambia el tiempo.
+
+### Dificultad de Seguimiento
+
+Igual que en los otros modos con niveles (fácil, normal, difícil, experto, adaptativa).
+El nivel sube la velocidad, achica el blanco y hace que cambie de rumbo más seguido:
+
+| dificultad | velocidad | blanco | cambia de rumbo cada |
+|---|---|---|---|
+| fácil | 8 celdas/s | 7x3 | 1.3–2.6 s |
+| normal | 12 | 6x3 | 0.9–2.0 s |
+| difícil | 19 | 4x2 | 0.6–1.4 s |
+| experto | 30 | 3x1 | 0.3–0.8 s |
+
+En adaptativa, cada segundo cuenta: con el cursor encima al menos el 80% del segundo es
+un éxito (3 seguidos suben un nivel), menos del 50% es un fallo (baja uno) y lo de en
+medio solo corta la racha. El nivel cambia en vivo, sin reiniciar el recuadro.
 
 ### Dificultad de Flick
 
@@ -315,9 +331,8 @@ Todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de Windows):
   "flick_level": 3,
   "flick_adapt_ms": 850,
   "tracking_secs": 30,
-  "tracking_w": 6,
-  "tracking_h": 3,
-  "tracking_speed": 12.0,
+  "tracking_difficulty": "adaptive",
+  "tracking_level": 3,
   "reaction_trials": 20,
   "gonogo_trials": 30,
   "nogo_ratio": 0.25,

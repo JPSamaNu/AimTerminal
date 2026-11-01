@@ -6,6 +6,7 @@
 use super::layout::{cell_distance, center, contains, inner};
 use super::{GameMode, Method, Outcome, Params, Response, Step, TrialRecord, pt};
 use crate::config::{Config, Fill};
+use crate::difficulty::tracking_level;
 use crate::render;
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -19,6 +20,8 @@ pub struct Tracking {
     rng: fastrand::Rng,
     size: (u16, u16),
     speed: f32,
+    turn_ms: (u64, u64),
+    level: Option<usize>,
     fill: Fill,
     area: Rect,
     /// Esquina superior izquierda, en celdas.
@@ -41,8 +44,10 @@ impl Tracking {
         let now = Instant::now();
         Tracking {
             rng,
-            size: (cfg.tracking_w, cfg.tracking_h),
-            speed: cfg.tracking_speed,
+            size: (tracking_level(cfg.tracking_level).w, tracking_level(cfg.tracking_level).h),
+            speed: tracking_level(cfg.tracking_level).speed,
+            turn_ms: tracking_level(cfg.tracking_level).turn_ms,
+            level: None,
             fill: cfg.target_fill,
             area: Rect::default(),
             pos: (0.0, 0.0),
@@ -68,7 +73,7 @@ impl Tracking {
         let a = inner(self.area);
         if now >= self.next_turn {
             self.heading += (self.rng.f32() - 0.5) * std::f32::consts::PI;
-            self.next_turn = now + Duration::from_millis(self.rng.u64(600..=1800));
+            self.next_turn = now + Duration::from_millis(self.rng.u64(self.turn_ms.0..=self.turn_ms.1));
         }
         // En vertical se avanza la mitad: las celdas miden el doble de alto.
         let (mut x, mut y) = (
@@ -103,7 +108,7 @@ impl Tracking {
         let r = self.rect();
         let rec = TrialRecord {
             index: self.completed,
-            level: None,
+            level: self.level,
             n_boxes: 1,
             target_present: true,
             target_w: r.width,
@@ -133,10 +138,16 @@ impl GameMode for Tracking {
         "tracking"
     }
 
-    fn start_trial(&mut self, area: Rect, _params: &Params, now: Instant, cursor: Option<(f32, f32)>) {
+    fn start_trial(&mut self, area: Rect, params: &Params, now: Instant, cursor: Option<(f32, f32)>) {
         if cursor.is_some() {
             self.cursor = cursor;
         }
+        // El nivel puede cambiar cada segundo (escalera adaptativa): velocidad, tamaño y giros.
+        let tl = tracking_level(params.level.unwrap_or(3));
+        self.level = params.level;
+        self.speed = tl.speed;
+        self.turn_ms = tl.turn_ms;
+        self.size = (params.box_w, params.box_h);
         if !self.active || self.area != area {
             self.area = area;
             let a = inner(area);
@@ -208,9 +219,10 @@ mod tests {
 
     #[test]
     fn stays_inside_area_and_moves() {
-        let mut m = Tracking::new(&Config { tracking_speed: 40.0, ..Config::default() }, fastrand::Rng::with_seed(6));
+        let mut m = Tracking::new(&Config::default(), fastrand::Rng::with_seed(6));
         let t0 = Instant::now();
         m.start_trial(Rect::new(0, 0, 60, 20), &params(), t0, None);
+        m.speed = 40.0;
         let start = m.pos;
         let mut t = t0;
         for _ in 0..600 {
@@ -224,9 +236,10 @@ mod tests {
 
     #[test]
     fn window_scores_time_on_target() {
-        let mut m = Tracking::new(&Config { tracking_speed: 1.0, ..Config::default() }, fastrand::Rng::with_seed(2));
+        let mut m = Tracking::new(&Config::default(), fastrand::Rng::with_seed(2));
         let t0 = Instant::now();
         m.start_trial(Rect::new(0, 0, 80, 24), &params(), t0, None);
+        m.speed = 1.0;
         // Cursor siempre sobre el centro del recuadro.
         let mut t = t0;
         let rec = loop {

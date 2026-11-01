@@ -89,6 +89,44 @@ pub fn speed_signal(outcome: Outcome, rt_ms: Option<f64>, fast_ms: u64) -> Optio
     }
 }
 
+/// Seguimiento por nivel: velocidad (celdas por segundo), ancho, alto y cada cuánto
+/// cambia de rumbo (mín. y máx. en ms).
+const TRACKING: [(f32, u16, u16, u64, u64); 10] = [
+    (6.0, 8, 3, 1500, 3000),
+    (8.0, 7, 3, 1300, 2600),
+    (10.0, 6, 3, 1100, 2300),
+    (12.0, 6, 3, 900, 2000),
+    (14.0, 5, 2, 800, 1800),
+    (16.0, 5, 2, 700, 1600),
+    (19.0, 4, 2, 600, 1400),
+    (22.0, 4, 2, 500, 1200),
+    (26.0, 3, 1, 400, 1000),
+    (30.0, 3, 1, 300, 800),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrackingLevel {
+    pub speed: f32,
+    pub w: u16,
+    pub h: u16,
+    pub turn_ms: (u64, u64),
+}
+
+pub fn tracking_level(level: usize) -> TrackingLevel {
+    let (speed, w, h, a, b) = TRACKING[level.min(MAX_LEVEL)];
+    TrackingLevel { speed, w, h, turn_ms: (a, b) }
+}
+
+/// Seguimiento adaptativo: un segundo con el cursor encima al menos el 80% del tiempo es
+/// un éxito; menos del 50% es un fallo; lo de en medio solo corta la racha.
+pub fn tracking_signal(score: Option<f32>) -> Option<bool> {
+    match score? {
+        s if s >= 0.8 => Some(true),
+        s if s < 0.5 => Some(false),
+        _ => None,
+    }
+}
+
 /// Flick por nivel: ancho y alto del blanco, y en qué parte del rango de distancias
 /// sale (0 = lo más cerca del cursor, 1 = lo más lejos).
 const FLICK: [(u16, u16, f32, f32); 10] = [
@@ -211,6 +249,18 @@ mod tests {
         assert_eq!(speed_signal(Outcome::Hit, Some(1500.0), 900), Some(false));
         assert_eq!(speed_signal(Outcome::Miss, Some(300.0), 900), Some(false));
         assert_eq!(speed_signal(Outcome::Omission, None, 900), Some(false));
+    }
+
+    #[test]
+    fn tracking_gets_faster_smaller_and_twitchier() {
+        for l in 1..=MAX_LEVEL {
+            let (a, b) = (tracking_level(l - 1), tracking_level(l));
+            assert!(b.speed > a.speed && b.w * b.h <= a.w * a.h && b.turn_ms.1 < a.turn_ms.1);
+        }
+        assert_eq!(tracking_signal(Some(0.9)), Some(true));
+        assert_eq!(tracking_signal(Some(0.6)), None);
+        assert_eq!(tracking_signal(Some(0.3)), Some(false));
+        assert_eq!(tracking_signal(None), None);
     }
 
     #[test]

@@ -105,7 +105,7 @@ impl GameKind {
 
     /// Modos con dificultad (fija o adaptativa).
     pub fn adaptive(self) -> bool {
-        matches!(self, GameKind::Decision | GameKind::Targets | GameKind::Flick)
+        matches!(self, GameKind::Decision | GameKind::Targets | GameKind::Flick | GameKind::Tracking)
     }
 }
 
@@ -160,11 +160,11 @@ pub struct Config {
     pub flick_level: usize,
     /// Flick adaptativo: un acierto cuenta para subir de nivel si tarda como mucho esto.
     pub flick_adapt_ms: u64,
-    /// Modo Seguimiento: duración, tamaño y velocidad (celdas por segundo).
+    /// Modo Seguimiento: duración y dificultad. El nivel (0 a 9) sube la velocidad,
+    /// achica el blanco y hace que cambie de rumbo más seguido.
     pub tracking_secs: u64,
-    pub tracking_w: u16,
-    pub tracking_h: u16,
-    pub tracking_speed: f32,
+    pub tracking_difficulty: Difficulty,
+    pub tracking_level: usize,
     /// Reacción pura y Go/No-Go: intentos y tiempo para responder.
     pub reaction_trials: usize,
     pub gonogo_trials: usize,
@@ -215,9 +215,8 @@ impl Default for Config {
             flick_level: 3,
             flick_adapt_ms: 850,
             tracking_secs: 30,
-            tracking_w: 6,
-            tracking_h: 3,
-            tracking_speed: 12.0,
+            tracking_difficulty: Difficulty::Adaptive,
+            tracking_level: 3,
             reaction_trials: 20,
             gonogo_trials: 30,
             nogo_ratio: 0.25,
@@ -270,9 +269,7 @@ impl Config {
         self.flick_adapt_ms = self.flick_adapt_ms.clamp(200, 5000);
         self.flick_timeout_ms = self.flick_timeout_ms.clamp(500, 20_000);
         self.tracking_secs = self.tracking_secs.clamp(5, 600);
-        self.tracking_w = self.tracking_w.clamp(2, 20);
-        self.tracking_h = self.tracking_h.clamp(1, 10);
-        self.tracking_speed = self.tracking_speed.clamp(1.0, 80.0);
+        self.tracking_level = self.tracking_level.min(9);
         self.reaction_trials = self.reaction_trials.clamp(1, 500);
         self.gonogo_trials = self.gonogo_trials.clamp(1, 500);
         self.nogo_ratio = self.nogo_ratio.clamp(0.0, 0.6);
@@ -282,20 +279,32 @@ impl Config {
 
     /// Dificultad del modo elegido (Blancos tiene la suya).
     pub fn mode_difficulty(&self) -> Difficulty {
+        self.levels().map(|(d, _)| d).unwrap_or(self.difficulty)
+    }
+
+    /// Dificultad y nivel fijo de los modos con niveles de 0 a 9 (todos menos Decisión,
+    /// que tiene su propia escalera, y Reacción, que no tiene dificultad).
+    pub fn levels(&self) -> Option<(Difficulty, usize)> {
         match self.mode {
-            GameKind::Targets => self.targets_difficulty,
-            GameKind::Flick => self.flick_difficulty,
-            _ => self.difficulty,
+            GameKind::Targets => Some((self.targets_difficulty, self.targets_level)),
+            GameKind::Flick => Some((self.flick_difficulty, self.flick_level)),
+            GameKind::Tracking => Some((self.tracking_difficulty, self.tracking_level)),
+            _ => None,
         }
     }
 
-    /// Nivel elegido para la dificultad fija de Blancos o Flick.
-    pub fn fixed_level(&self) -> Option<usize> {
+    fn levels_mut(&mut self) -> Option<(&mut Difficulty, &mut usize)> {
         match self.mode {
-            GameKind::Targets => Some(self.targets_level),
-            GameKind::Flick => Some(self.flick_level),
+            GameKind::Targets => Some((&mut self.targets_difficulty, &mut self.targets_level)),
+            GameKind::Flick => Some((&mut self.flick_difficulty, &mut self.flick_level)),
+            GameKind::Tracking => Some((&mut self.tracking_difficulty, &mut self.tracking_level)),
             _ => None,
         }
+    }
+
+    /// Nivel elegido para la dificultad fija.
+    pub fn fixed_level(&self) -> Option<usize> {
+        self.levels().map(|(_, l)| l)
     }
 
     /// Tiempo de un acierto "rápido" para la escalera de Blancos o Flick.
@@ -308,49 +317,42 @@ impl Config {
     }
 
     /// Siguiente opción de dificultad del modo elegido. En Decisión alterna fija y
-    /// adaptativa; en Blancos recorre fácil, normal, difícil, experto y adaptativa.
+    /// adaptativa; en los modos con niveles recorre fácil, normal, difícil, experto y
+    /// adaptativa.
     pub fn cycle_difficulty(&mut self, forward: bool) {
-        match self.mode {
-            GameKind::Decision => {
-                self.difficulty = match self.difficulty {
-                    Difficulty::Fixed => Difficulty::Adaptive,
-                    Difficulty::Adaptive => Difficulty::Fixed,
-                }
+        if self.mode == GameKind::Decision {
+            self.difficulty = match self.difficulty {
+                Difficulty::Fixed => Difficulty::Adaptive,
+                Difficulty::Adaptive => Difficulty::Fixed,
+            };
+            return;
+        }
+        let Some((difficulty, level)) = self.levels_mut() else { return };
+        let n = TARGET_PRESETS.len() + 1;
+        let current = match *difficulty {
+            Difficulty::Adaptive => TARGET_PRESETS.len(),
+            Difficulty::Fixed => {
+                TARGET_PRESETS.iter().position(|(l, _)| *l >= *level).unwrap_or(TARGET_PRESETS.len() - 1)
             }
-            GameKind::Targets | GameKind::Flick => {
-                let (difficulty, level) = match self.mode {
-                    GameKind::Flick => (&mut self.flick_difficulty, &mut self.flick_level),
-                    _ => (&mut self.targets_difficulty, &mut self.targets_level),
-                };
-                let n = TARGET_PRESETS.len() + 1;
-                let current = match *difficulty {
-                    Difficulty::Adaptive => TARGET_PRESETS.len(),
-                    Difficulty::Fixed => {
-                        TARGET_PRESETS.iter().position(|(l, _)| *l >= *level).unwrap_or(TARGET_PRESETS.len() - 1)
-                    }
-                };
-                let next = if forward { (current + 1) % n } else { (current + n - 1) % n };
-                if next == TARGET_PRESETS.len() {
-                    *difficulty = Difficulty::Adaptive;
-                } else {
-                    *difficulty = Difficulty::Fixed;
-                    *level = TARGET_PRESETS[next].0;
-                }
-            }
-            _ => {}
+        };
+        let next = if forward { (current + 1) % n } else { (current + n - 1) % n };
+        if next == TARGET_PRESETS.len() {
+            *difficulty = Difficulty::Adaptive;
+        } else {
+            *difficulty = Difficulty::Fixed;
+            *level = TARGET_PRESETS[next].0;
         }
     }
 
     /// Nombre de la dificultad del modo elegido, si tiene.
     pub fn difficulty_label(&self) -> Option<String> {
-        match (self.mode, self.mode_difficulty()) {
-            (GameKind::Decision, d) => Some(d.label().to_string()),
-            (GameKind::Targets | GameKind::Flick, Difficulty::Adaptive) => Some("adaptativa".to_string()),
-            (GameKind::Targets | GameKind::Flick, Difficulty::Fixed) => {
-                self.fixed_level().map(targets_level_label)
-            }
-            _ => None,
+        if self.mode == GameKind::Decision {
+            return Some(self.difficulty.label().to_string());
         }
+        self.levels().map(|(d, l)| match d {
+            Difficulty::Adaptive => "adaptativa".to_string(),
+            Difficulty::Fixed => targets_level_label(l),
+        })
     }
 
     /// Intentos que cuentan para terminar una sesión (en los modos por cantidad).

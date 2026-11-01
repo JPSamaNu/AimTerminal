@@ -102,7 +102,12 @@ pub fn title(s: &Session, st: &Stats) -> String {
             s.cfg.session_secs().unwrap_or(0),
             s.cfg.difficulty_label().unwrap_or_default()
         ),
-        GameKind::Tracking => format!("{} · {} s", kind.label(), s.cfg.session_secs().unwrap_or(0)),
+        GameKind::Tracking => format!(
+            "{} · {} s · {}",
+            kind.label(),
+            s.cfg.session_secs().unwrap_or(0),
+            s.cfg.difficulty_label().unwrap_or_default()
+        ),
         GameKind::Flick => {
             format!("{} · {} · {}", kind.label(), s.counted, s.cfg.difficulty_label().unwrap_or_default())
         }
@@ -245,6 +250,7 @@ pub fn difficulty_key(s: &SessionRecord) -> Option<String> {
         difficulty: s.difficulty,
         targets_difficulty: s.difficulty,
         flick_difficulty: s.difficulty,
+        tracking_difficulty: s.difficulty,
         ..s.config.clone()
     };
     cfg.difficulty_label()

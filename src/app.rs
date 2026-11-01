@@ -362,7 +362,7 @@ impl App {
 
     pub fn with_history(cfg: Config, size: Rect, history_path: PathBuf) -> App {
         let theme = Theme::from_config(&cfg);
-        let mouse = Mouse::new(cfg.pixel_mouse, size.width, size.height);
+        let mouse = Mouse::new(cfg.pixel_mouse, size.width, size.height, cfg.cell_px);
         let (mut history, bad_lines) = history::load(&history_path);
         for s in &mut history {
             s.trials = Vec::new();

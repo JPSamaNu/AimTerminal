@@ -411,6 +411,9 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
     if s.baseline {
         text.push_str("  base");
     }
+    if app.mouse.pixel == crate::input::PixelMode::On {
+        text.push_str("  px");
+    }
     if let Some(l) = s.level() {
         text.push_str(&format!("  niv {l}"));
     }

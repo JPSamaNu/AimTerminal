@@ -141,6 +141,8 @@ pub struct Config {
     pub distractor_color: String,
     /// Intentar el modo de mouse en píxeles (SGR-Pixels, 1016).
     pub pixel_mouse: bool,
+    /// Tamaño de una celda en píxeles [ancho, alto], si la terminal no lo informa.
+    pub cell_px: Option<[f32; 2]>,
     /// Modo Blancos: cuántos verdes a la vez, duración y tamaño.
     pub targets_count: usize,
     pub targets_secs: u64,
@@ -210,6 +212,7 @@ impl Default for Config {
             target_color: "green".into(),
             distractor_color: "red".into(),
             pixel_mouse: false,
+            cell_px: None,
             targets_count: 3,
             targets_secs: 30,
             targets_w: 6,
@@ -263,6 +266,7 @@ impl Config {
             target_color: self.target_color.clone(),
             distractor_color: self.distractor_color.clone(),
             pixel_mouse: self.pixel_mouse,
+            cell_px: self.cell_px,
             ..d
         }
     }

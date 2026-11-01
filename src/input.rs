@@ -39,15 +39,19 @@ pub struct Mouse {
     pub pixel: PixelMode,
     grid: (u16, u16),
     cell_px: Option<(f32, f32)>,
+    /// Tamaño de celda en píxeles indicado en la configuración, para terminales que no lo
+    /// informan (en Windows crossterm no puede preguntarlo).
+    fallback_px: Option<(f32, f32)>,
 }
 
 impl Mouse {
-    pub fn new(pixel_requested: bool, cols: u16, rows: u16) -> Mouse {
+    pub fn new(pixel_requested: bool, cols: u16, rows: u16, fallback_px: Option<[f32; 2]>) -> Mouse {
         let mut m = Mouse {
             pos: None,
             pixel: if pixel_requested { PixelMode::Probing } else { PixelMode::Off },
             grid: (cols, rows),
             cell_px: None,
+            fallback_px: fallback_px.filter(|[w, h]| *w > 0.0 && *h > 0.0).map(|[w, h]| (w, h)),
         };
         m.set_grid(cols, rows);
         m
@@ -58,7 +62,7 @@ impl Mouse {
         if self.pixel == PixelMode::Off {
             return;
         }
-        self.cell_px = cell_pixels(cols, rows);
+        self.cell_px = cell_pixels(cols, rows).or(self.fallback_px);
         if self.cell_px.is_none() {
             // Sin tamaño en píxeles no hay forma de convertir: volvemos a celdas.
             self.pixel = PixelMode::Off;
@@ -120,13 +124,31 @@ mod tests {
 
     #[test]
     fn cell_coordinates_use_cell_center() {
-        let mut m = Mouse::new(false, 80, 24);
+        let mut m = Mouse::new(false, 80, 24, None);
         assert_eq!(m.map(3, 4), (3.5, 4.5));
     }
 
     #[test]
+    fn manual_cell_size_keeps_pixel_mode_available() {
+        // Sin tamaño en píxeles de la terminal, solo sigue disponible con `cell_px`.
+        let mut m = Mouse::new(true, 80, 24, Some([9.0, 18.0]));
+        if m.pixel == PixelMode::Probing {
+            assert_eq!(m.map(900, 180), (100.0, 10.0));
+            assert_eq!(m.pixel, PixelMode::On);
+        }
+        let m = Mouse::new(true, 80, 24, Some([0.0, 18.0]));
+        assert_eq!(m.fallback_px, None);
+    }
+
+    #[test]
     fn pixel_probe_switches_on_out_of_grid() {
-        let mut m = Mouse { pos: None, pixel: PixelMode::Probing, grid: (80, 24), cell_px: Some((10.0, 20.0)) };
+        let mut m = Mouse {
+            pos: None,
+            pixel: PixelMode::Probing,
+            grid: (80, 24),
+            cell_px: Some((10.0, 20.0)),
+            fallback_px: None,
+        };
         assert_eq!(m.map(5, 5), (5.5, 5.5));
         assert_eq!(m.map(400, 200), (40.0, 10.0));
         assert_eq!(m.pixel, PixelMode::On);

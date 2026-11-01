@@ -212,6 +212,9 @@ fn status(f: &mut Frame, app: &App, area: Rect) {
     if let Some(l) = s.level() {
         rest.push_str(&format!(" lvl{l}"));
     }
+    if app.mouse.pixel == crate::input::PixelMode::On {
+        rest.push_str(" px");
+    }
     if let (Some(r), false) = (&s.last, s.cfg.mode == GameKind::Tracking) {
         rest.push_str(&format!(": {}", r.outcome.label()));
         if let (Some(ms), false) = (r.rt_ms, r.anticipation) {

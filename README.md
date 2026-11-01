@@ -4,6 +4,14 @@ Práctica de decisión y reflejos para la terminal, pensada para ratos de espera
 (mientras compila un proyecto o corren pruebas) en un panel de Windows Terminal.
 Sesiones de 1 a 2 minutos, sin sonido y sin consumo de CPU en reposo.
 
+## Usar sin compilar
+
+`bin/rt.exe` es el ejecutable listo para usar, actualizado en cada commit. Solo depende
+de DLLs de Windows, así que en otra computadora basta con copiarlo a una carpeta del
+`PATH` (o correrlo con su ruta); no hace falta instalar Rust. `target/` (lo que genera
+`cargo build`, ~700 MB) queda fuera de git: para desarrollar, `cargo build` lo
+reconstruye.
+
 ## Compilar
 
 Requiere Rust estable. Con el toolchain GNU (`stable-x86_64-pc-windows-gnu`) o MSVC:

@@ -230,12 +230,19 @@ impl Default for Config {
 impl Config {
     /// Configuración de la prueba base: siempre la misma, sin adaptación.
     /// Solo conserva la apariencia del usuario (tema, colores, relleno).
+    ///
+    /// Hay dos: la de Decisión (30 intentos, dificultad fija) y la de Flick (30 blancos en
+    /// nivel 4 fijo). Con el modo en Flick se usa la de Flick; en los demás, la de Decisión.
     pub fn baseline(&self) -> Config {
         let d = Config::default();
+        let mode = self.baseline_mode();
         Config {
-            mode: GameKind::Decision,
+            mode,
             trials: 30,
             difficulty: Difficulty::Fixed,
+            flick_trials: 30,
+            flick_difficulty: Difficulty::Fixed,
+            flick_level: 4,
             theme: self.theme,
             background: self.background,
             effects: self.effects,
@@ -245,6 +252,14 @@ impl Config {
             distractor_color: self.distractor_color.clone(),
             pixel_mouse: self.pixel_mouse,
             ..d
+        }
+    }
+
+    /// Modo de la prueba base que corresponde al modo elegido.
+    pub fn baseline_mode(&self) -> GameKind {
+        match self.mode {
+            GameKind::Flick => GameKind::Flick,
+            _ => GameKind::Decision,
         }
     }
 
@@ -591,6 +606,25 @@ mod tests {
         assert_eq!(b.box_w, Config::default().box_w);
         assert_eq!(b.difficulty, Difficulty::Fixed);
         assert_eq!(b.theme, ThemeName::Mono);
+        assert_eq!(b.mode, GameKind::Decision);
+    }
+
+    #[test]
+    fn flick_baseline_is_fixed_level() {
+        let c = Config {
+            mode: GameKind::Flick,
+            flick_trials: 7,
+            flick_difficulty: Difficulty::Adaptive,
+            flick_level: 9,
+            ..Config::default()
+        };
+        let b = c.baseline();
+        assert_eq!(b.mode, GameKind::Flick);
+        assert_eq!((b.flick_trials, b.flick_difficulty, b.flick_level), (30, Difficulty::Fixed, 4));
+        assert_eq!(b.warmup_trials, Config::default().warmup_trials);
+        // En un modo sin baseline propia se usa la de Decisión.
+        let t = Config { mode: GameKind::Tracking, ..Config::default() };
+        assert_eq!(t.baseline().mode, GameKind::Decision);
     }
 
     #[test]

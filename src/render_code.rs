@@ -119,7 +119,7 @@ fn menu(f: &mut Frame, app: &App, area: Rect) {
                 "--level",
                 app.cfg.difficulty_label().map(|l| format!("{l}  ←→")).unwrap_or_else(|| "-".to_string()),
             ),
-            MenuItem::Baseline => ("baseline", "prueba base fija".to_string()),
+            MenuItem::Baseline => ("baseline", format!("prueba base fija ({})", app.cfg.baseline_mode().id())),
             MenuItem::Progress => ("log", "progreso".to_string()),
             MenuItem::Aim => ("aim", "puntería por dirección".to_string()),
             MenuItem::Quit => ("exit", "salir".to_string()),

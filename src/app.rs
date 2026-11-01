@@ -43,11 +43,12 @@ pub const MENU: [MenuItem; 7] = [
 const AIM_SESSIONS: usize = 30;
 
 /// Vistas de la pantalla de progreso: (modo, baseline).
-pub const PROGRESS_VIEWS: [(GameKind, bool); 7] = [
+pub const PROGRESS_VIEWS: [(GameKind, bool); 8] = [
     (GameKind::Decision, false),
     (GameKind::Decision, true),
     (GameKind::Targets, false),
     (GameKind::Flick, false),
+    (GameKind::Flick, true),
     (GameKind::Tracking, false),
     (GameKind::Reaction, false),
     (GameKind::GoNoGo, false),

@@ -94,7 +94,7 @@ pub fn hint(kind: GameKind) -> &'static str {
 pub fn title(s: &Session, st: &Stats) -> String {
     let kind = s.cfg.mode;
     let mut t = match kind {
-        GameKind::Decision if s.baseline => format!("baseline · {} · {}", kind.label(), st.trials),
+        GameKind::Decision | GameKind::Flick if s.baseline => format!("baseline · {} · {}", kind.label(), s.counted),
         GameKind::Decision => format!("{} · {} · {}", kind.label(), s.cfg.difficulty.label(), st.trials),
         GameKind::Targets => format!(
             "{} · {} s · {}",

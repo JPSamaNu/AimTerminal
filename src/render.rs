@@ -309,7 +309,7 @@ fn menu(f: &mut Frame, app: &App, area: Rect) {
             MenuItem::Start => ("empezar", String::new()),
             MenuItem::Mode => ("modo", app.cfg.mode.label().to_string()),
             MenuItem::Difficulty => ("dificultad", app.cfg.difficulty_label().unwrap_or_else(|| "—".into())),
-            MenuItem::Baseline => ("baseline", String::new()),
+            MenuItem::Baseline => ("baseline", app.cfg.baseline_mode().label().to_string()),
             MenuItem::Progress => ("progreso", String::new()),
             MenuItem::Aim => ("puntería", String::new()),
             MenuItem::Quit => ("salir", String::new()),
@@ -538,9 +538,9 @@ pub(crate) fn trend(t: &Theme, vals: &[f64], lower_is_better: bool) -> Span<'sta
 }
 
 /// Nombre de una vista del progreso.
-pub(crate) fn view_name(i: usize) -> &'static str {
+pub(crate) fn view_name(i: usize) -> String {
     let (k, b) = PROGRESS_VIEWS[i % PROGRESS_VIEWS.len()];
-    if b { "baseline" } else { k.label() }
+    if b { format!("baseline {}", k.label()) } else { k.label().to_string() }
 }
 
 fn progress(f: &mut Frame, app: &App, area: Rect) {

@@ -46,7 +46,7 @@ cargo clippy --all-targets
 ```
 rt                     menú
 rt --quick             empieza una sesión de inmediato
-rt --baseline          prueba base de Decisión: 30 intentos, sin adaptación
+rt --baseline          prueba base fija (de Decisión; con --mode flick, la de Flick)
 rt --mode blancos      modo Blancos (los modos también se eligen en el menú con ←→)
 rt --mode flick        un blanco a la vez, en las 8 direcciones
 rt --mode seguimiento  mantener el cursor sobre un blanco que se mueve
@@ -174,6 +174,17 @@ El resumen de Blancos compara la mediana de los aciertos **cerca del centro** (r
 < 0.5) con los de **lejos**, y cada intento guarda su radio (0 centro, 1 borde) en el
 historial y en el CSV (`radius`). Una sesión solo se compara con otra de la misma
 dificultad (y en fija, del mismo nivel), porque la distancia cambia el tiempo.
+
+### Baselines
+
+Hay dos pruebas base, siempre iguales, para comparar semana a semana:
+
+- **Decisión**: 30 intentos con la configuración por defecto y dificultad fija.
+- **Flick**: 30 blancos en nivel 4 fijo (blanco 4x2, distancia media), 3 s por blanco.
+
+`baseline` en el menú (o `rt --baseline`) corre la de Flick si el modo elegido es flick, y
+la de Decisión en los demás. Las dos solo toman de tu configuración la apariencia y el
+calentamiento (3 intentos por defecto), y tienen su propia vista en el progreso.
 
 ### Dificultad de Seguimiento
 

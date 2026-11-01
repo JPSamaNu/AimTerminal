@@ -320,7 +320,34 @@ Se cambia en el menú, con `--fixed` / `--adaptive` o en el archivo de configura
 
 ## Datos
 
-Todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de Windows):
+Por defecto todo vive en `%APPDATA%\term-aim\` (`~/.config/term-aim` fuera de
+Windows). Esa carpeta no está en el repositorio, así que no viaja con git.
+
+### Llevar el historial a otra computadora
+
+```bash
+rt data
+```
+
+```bash
+rt data set C:\Proyectos\SukaTrainer\data
+```
+
+`rt data` dice qué carpeta se usa y por qué. `rt data set CARPETA` pasa a usar esa
+carpeta desde ahora: fusiona en ella el historial actual (sin duplicar sesiones y
+ordenado por fecha), copia la configuración si allá no hay una y lo recuerda. No borra
+la carpeta anterior. `rt data reset` vuelve a la de por defecto.
+
+Para seguir en otra computadora, guarda los datos dentro del repositorio (por ejemplo en
+`data/`), haz commit y, allá, después de clonar: `bin\rt.exe data set <repo>\data`. Si el
+repositorio es público, el historial también lo será.
+
+Prioridad, de mayor a menor: `--data CARPETA` (solo esa ejecución), la variable de
+entorno `RT_DATA`, la carpeta guardada con `rt data set`, una carpeta `rt-data` junto al
+ejecutable (modo portátil: crea `bin\rt-data` y `bin\rt.exe` la usa sola) y la de por
+defecto.
+
+### Archivos
 
 - `history.jsonl`: una línea por sesión con fecha (UTC), modo, dificultad, configuración,
   si es baseline o incompleta, intentos descartados, nivel final, estadísticas e intentos.
